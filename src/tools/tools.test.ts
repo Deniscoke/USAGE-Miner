@@ -133,6 +133,43 @@ function codexConfigPath(): string {
   return path.join(process.env.CODEX_HOME!, "config.toml");
 }
 
+describe("disable on a machine USAGE never configured", () => {
+  // The uninstaller calls `disable` for every tool unconditionally, so this is
+  // the common case, not an edge case: most people uninstalling have not
+  // enabled mining for every tool. Touching a file we did not write would be a
+  // stranger reformatting your configuration on the way out.
+  it("leaves a Claude Code settings file the user wrote completely alone", async () => {
+    const original = `{\n  "theme": "dark",\n  "env": { "ANTHROPIC_API_KEY": "sk-user-own" }\n}`;
+    await writeClaudeSettings(original);
+
+    const result = await claudeCodeAdapter.disableMining();
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toMatch(/not configured by USAGE/);
+    expect(await readFile(claudeSettingsPath(), "utf8")).toBe(original);
+  });
+
+  it("leaves a Claude Code settings file pointed somewhere else alone", async () => {
+    const original = `{\n  "env": { "ANTHROPIC_BASE_URL": "https://someone-elses-proxy.example" }\n}`;
+    await writeClaudeSettings(original);
+
+    await claudeCodeAdapter.disableMining();
+
+    expect(await readFile(claudeSettingsPath(), "utf8")).toBe(original);
+  });
+
+  it("leaves a Codex config the user wrote completely alone", async () => {
+    const original = `approval_policy = "on-request"\nmodel_provider = "openai"\n`;
+    await mkdir(process.env.CODEX_HOME!, { recursive: true });
+    await writeFile(codexConfigPath(), original, "utf8");
+
+    const result = await codexAdapter.disableMining();
+
+    expect(result.ok).toBe(true);
+    expect(await readFile(codexConfigPath(), "utf8")).toBe(original);
+  });
+});
+
 describe("Codex adapter", () => {
   it("writes a provider block Codex understands", async () => {
     const result = await codexAdapter.enableMining(ROUTE);

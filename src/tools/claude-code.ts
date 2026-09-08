@@ -161,6 +161,15 @@ export const claudeCodeAdapter: LocalToolAdapter = {
     }
 
     if (!backup) {
+      // Nothing of ours is in there. Say so and touch nothing -- `disable` is
+      // called unconditionally by the uninstaller, and rewriting a file USAGE
+      // never wrote would reformat it and could drop a key the user set
+      // themselves.
+      const routing = await this.inspectRouting();
+      if (routing.state !== "usage") {
+        return { ok: true, message: "Claude Code was not configured by USAGE." };
+      }
+
       // No rollback copy: remove only the keys USAGE sets, and leave the rest.
       const current = await readSettings();
       if (!current) return { ok: false, message: "Could not read Claude Code settings." };

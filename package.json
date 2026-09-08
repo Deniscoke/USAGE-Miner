@@ -1,17 +1,17 @@
 {
   "name": "usage-miner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "USAGE Miner \u2014 routes your AI tools through USAGE so their compute can be verified.",
+  "description": "USAGE Miner — routes your AI tools through USAGE so their compute can be verified.",
   "type": "module",
   "bin": {
-    "usage": "./dist/cli.js"
+    "usage": "./dist/app.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "package": "node scripts/package.mjs",
+    "package": "node scripts/package.mjs --with-installer",
     "dev": "node --import tsx src/cli.ts"
   },
   "engines": {
@@ -19,6 +19,8 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6",
     "tsx": "^4.23.13",
     "typescript": "^5",
     "vitest": "^5.0.0"

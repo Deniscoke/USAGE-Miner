@@ -191,6 +191,14 @@ export const codexAdapter: LocalToolAdapter = {
       return { ok: true, message: "Codex configuration restored to what it was before." };
     }
 
+    // Nothing of ours is in there. Say so and touch nothing -- `disable` is
+    // called unconditionally by the uninstaller, and rewriting a file USAGE
+    // never wrote would reformat somebody else's configuration for no reason.
+    const routing = await this.inspectRouting();
+    if (routing.state !== "usage") {
+      return { ok: true, message: "Codex was not configured by USAGE." };
+    }
+
     // No rollback copy: remove only our delimited block.
     const config = await readConfig();
     if (!config.existed) return { ok: true, message: "Codex was not configured by USAGE." };

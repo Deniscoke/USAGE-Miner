@@ -358,8 +358,15 @@ function help(): void {
 `);
 }
 
-async function main(): Promise<void> {
-  const [command, ...rest] = process.argv.slice(2);
+/**
+ * Run one CLI command.
+ *
+ * Exported rather than run on import so the packaged desktop executable can
+ * share this exact implementation: one binary, one code path, no second copy
+ * of the pairing or tool logic to drift.
+ */
+export async function runCli(argv: string[]): Promise<void> {
+  const [command, ...rest] = argv;
   const force = rest.includes("--force");
   const args = rest.filter((arg) => arg !== "--force");
 
@@ -404,5 +411,3 @@ async function main(): Promise<void> {
     throw error;
   }
 }
-
-main();
