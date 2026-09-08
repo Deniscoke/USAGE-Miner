@@ -1,0 +1,234 @@
+# Build, sign and release USAGE Miner.
+#
+# This is the ONLY path by which a published binary may come into existence. A
+# locally built executable is never a release artifact: SignPath verifies, via
+# the GitHub App, that a specific GitHub-hosted runner executed this workflow at
+# a specific commit, and that the artifact was stored by GitHub before it was
+# submitted. Origin metadata comes from GitHub, not from anything the build
+# script says about itself, so a build cannot lie about where it came from.
+#
+# THE ORDER IS THE POINT:
+#
+#   test -> build -> package -> upload artifact -> SIGN -> verify -> checksum
+#
+# Signing happens BEFORE the published checksums, because an Authenticode
+# signature is appended to the PE and changes every byte after it; a checksum
+# taken earlier describes a file nobody will download. Nothing modifies a signed
+# binary afterwards -- no repack, no resource edit, no icon fix -- because each
+# of those silently invalidates the signature. That is also why the version
+# resource is stamped during `npm run package`, well before signing.
+#
+# FAIL CLOSED. If signing was requested and the result does not verify, or
+# verifies to an unexpected publisher, the job fails and nothing is published. A
+# release labelled "signed" that carries an unsigned or broken binary is worse
+# than one that claims nothing.
+#
+# WHO CAN TRIGGER IT. Tags matching v*, or a manual dispatch -- and in both
+# cases the ref is validated below before any secret is used. Pull requests
+# cannot reach this workflow at all: they run `ci.yml`, which holds no secrets.
+#
+# STILL TO DO BEFORE THIS CAN SIGN (all human decisions):
+#   1. Apply to SignPath Foundation and be accepted.
+#   2. Install the SignPath GitHub App; create the project, signing policy and
+#      artifact configuration named below.
+#   3. Add SIGNPATH_API_TOKEN as a secret on the `release` environment, and
+#      SIGNPATH_ORGANIZATION_ID / SIGNPATH_EXPECTED_PUBLISHER as variables.
+#
+# The executable signing identity is SEPARATE from USAGE's Proof of Usage
+# receipt key and must stay separate. A compromised signing certificate means
+# bad binaries; a compromised receipt key means fabricated proofs. Neither may
+# ever stand in for the other, and the receipt key is not present here.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: "Submit to SignPath (requires SIGNPATH_API_TOKEN)"
+        type: boolean
+        default: true
+      publish:
+        description: "Create a draft GitHub release"
+        type: boolean
+        default: true
+
+# Least privilege. `contents: write` only because the release job attaches
+# assets; nothing here needs packages, deployments, or issue access.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      # SignPath reads build provenance from GitHub rather than trusting the
+      # build script's account of itself.
+      id-token: write
+    # Signing credentials live on a protected environment, so they cannot be
+    # reached by a workflow run from anywhere but an approved ref.
+    environment: release
+
+    steps:
+      # Refuse before touching a secret. A tag named anything else, or a manual
+      # dispatch from a topic branch, is not a release -- and a signing
+      # credential should never be handed to a run that was not going to
+      # produce one.
+      - name: Validate ref
+        shell: bash
+        run: |
+          echo "ref: $GITHUB_REF"
+          case "$GITHUB_REF" in
+            refs/tags/v*) echo "release tag accepted" ;;
+            refs/heads/main) echo "manual dispatch from main accepted" ;;
+            *) echo "::error::refusing to run a release from $GITHUB_REF"; exit 1 ;;
+          esac
+
+      - name: Checkout the exact commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned: the artifact literally contains this runtime, so the Node
+          # version is part of what its checksum means.
+          node-version: "24.13.1"
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Test
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Build and package
+        run: npm run package -- --publish
+
+      # A tag must describe the build it names. Catching this here beats
+      # discovering it in a release nobody can reproduce.
+      - name: Version matches the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "package $version, tag $tag"
+          case "$tag" in
+            "v$version"|"v$version-"*) echo "match" ;;
+            *) echo "::error::tag $tag does not name version $version"; exit 1 ;;
+          esac
+
+      # Stored before signing: SignPath will only sign an artifact it can see
+      # GitHub received from this workflow run.
+      - name: Upload unsigned artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: usage-miner-unsigned
+          path: dist/artifacts/
+          if-no-files-found: error
+
+      # ------------------------------------------------------------- signing
+
+      - name: Submit to SignPath
+        id: signpath
+        if: ${{ inputs.sign != false }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: usage-miner
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: windows-executables
+          github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist/signed
+
+      # The check that makes the word "signed" mean anything. Both files, not
+      # just the installer: the standalone executable is published too, and a
+      # user who downloads it deserves the same guarantee.
+      - name: Verify Authenticode
+        if: ${{ inputs.sign != false }}
+        shell: pwsh
+        env:
+          EXPECTED_PUBLISHER: ${{ vars.SIGNPATH_EXPECTED_PUBLISHER }}
+        run: |
+          $files = Get-ChildItem dist/signed -Filter *.exe
+          if ($files.Count -lt 2) {
+            Write-Output "::error::expected the standalone and the installer, got $($files.Count)"
+            exit 1
+          }
+
+          $failed = $false
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            Write-Output "$($f.Name): $($sig.Status) — $($sig.SignerCertificate.Subject)"
+
+            # Anything but Valid fails: NotSigned, HashMismatch, NotTrusted,
+            # UnknownError. There is no status worth publishing but this one.
+            if ($sig.Status -ne 'Valid') {
+              Write-Output "::error::$($f.Name) is not validly signed ($($sig.Status))"
+              $failed = $true
+              continue
+            }
+            # Identity, not merely validity. A valid signature from an
+            # unexpected publisher is a supply-chain incident, not a pass.
+            if ($env:EXPECTED_PUBLISHER -and
+                $sig.SignerCertificate.Subject -notlike "*$env:EXPECTED_PUBLISHER*") {
+              Write-Output "::error::$($f.Name) signed by an unexpected publisher"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      # Recomputed over the SIGNED bytes -- the ones people actually download --
+      # and over release.json too, so the manifest the website reads describes
+      # the signed files rather than the inputs to signing.
+      - name: Final checksums
+        if: ${{ inputs.sign != false }}
+        shell: bash
+        run: |
+          cd dist/signed
+          sha256sum *.exe | tee SHA256SUMS.txt
+          node "$GITHUB_WORKSPACE/scripts/restamp-manifest.mjs" .
+
+      - name: Upload signed artifact
+        if: ${{ inputs.sign != false }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: usage-miner-signed
+          path: dist/signed/
+          if-no-files-found: error
+
+      # ------------------------------------------------------------ release
+
+      # Draft, never published automatically. Attaching binaries to a public
+      # release is an outward-facing act, and it stays a decision a person makes
+      # after comparing checksums against their own rebuild.
+      #
+      # The source directory is chosen by whether signing actually ran, so an
+      # unsigned artifact cannot be published under a "signed" label by
+      # forgetting a flag.
+      - name: Create draft release
+        if: ${{ inputs.publish != false }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ inputs.sign != false }}
+        run: |
+          $dir   = if ($env:SIGNED -eq 'true') { 'dist/signed' } else { 'dist/artifacts' }
+          $label = if ($env:SIGNED -eq 'true') { 'signed' } else { 'UNSIGNED' }
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF -replace 'refs/tags/','' } else { "v$version" }
+
+          gh release create $tag `
+            --draft --prerelease `
+            --title "USAGE Miner $version ($label)" `
+            --notes "Built from $env:GITHUB_SHA by run $env:GITHUB_RUN_ID on a GitHub-hosted runner. Artifacts are $label. Verify the SHA-256 before running." `
+            (Get-ChildItem $dir | ForEach-Object { $_.FullName })

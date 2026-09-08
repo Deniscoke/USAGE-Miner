@@ -41,6 +41,17 @@ using System.Reflection;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+// The version resource Windows shows in file properties, and which SignPath
+// enforces as a file restriction on signed artifacts. Without it the installer
+// has no identity at all -- an unnamed executable asking to be trusted.
+[assembly: AssemblyTitle("USAGE Miner Setup")]
+[assembly: AssemblyProduct("USAGE Miner")]
+[assembly: AssemblyCompany("USAGE")]
+[assembly: AssemblyCopyright("Copyright 2026 USAGE. Apache License 2.0.")]
+[assembly: AssemblyDescription("Installs USAGE Miner for the current user.")]
+[assembly: AssemblyVersion(${JSON.stringify(version)} + ".0")]
+[assembly: AssemblyFileVersion(${JSON.stringify(version)} + ".0")]
+
 static class Setup {
     const string Product   = ${JSON.stringify(PRODUCT)};
     const string Version   = ${JSON.stringify(version)};

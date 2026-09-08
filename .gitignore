@@ -1,0 +1,9 @@
+node_modules/
+dist/
+
+# Local scratch. Never committed: a miner credential and a tool's real
+# configuration are the two things that must not end up in a repository.
+*.local
+.env
+.env.*
+!.env.example

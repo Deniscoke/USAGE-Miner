@@ -1,0 +1,30 @@
+# Every push and pull request, including from forks.
+#
+# Deliberately separate from the release workflow, and deliberately boring: it
+# has read-only permissions and no access to any secret. A pull request from a
+# stranger must be able to run tests without being anywhere near a signing
+# credential.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.13.1"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # Builds, but publishes nothing. Proves the packaging path still works
+      # without producing anything that could be mistaken for a release.
+      - run: npm run package
