@@ -55,9 +55,11 @@ async function bundle() {
     target: "node20",
     format: "cjs",
     outfile: bundlePath,
-    // Kept readable on purpose. This binary asks people to trust it with a
-    // credential and with their tools' configuration; anyone should be able to
-    // extract the blob and read exactly what it does.
+    // Unminified on purpose. This binary asks people to trust it with a
+    // credential and with their tools' configuration, so the blob anyone
+    // extracts from it should be readable code with real identifiers -- not a
+    // wall of single letters. (esbuild still strips comments; the structure and
+    // the names are what make it auditable.)
     minify: false,
     legalComments: "inline",
     define: { "process.env.NODE_ENV": '"production"' },

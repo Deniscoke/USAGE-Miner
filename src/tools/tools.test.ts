@@ -133,6 +133,30 @@ function codexConfigPath(): string {
   return path.join(process.env.CODEX_HOME!, "config.toml");
 }
 
+describe("where the miner token does and does not land", () => {
+  // Pinned deliberately. One adapter can reference a credential and the other
+  // cannot, and the difference is a security property users are told about --
+  // so it must fail loudly if either changes, rather than quietly making the
+  // download page's promise untrue.
+  it("Codex names the credential rather than embedding it", async () => {
+    await codexAdapter.enableMining(ROUTE);
+    const config = await readFile(codexConfigPath(), "utf8");
+    expect(config).not.toContain(ROUTE.minerToken);
+    expect(config).toContain('env_key = "USAGE_MINER_TOKEN"');
+  });
+
+  it("Claude Code embeds it, because its settings file has no indirection", async () => {
+    await claudeCodeAdapter.enableMining(ROUTE);
+    const settings = await readFile(claudeSettingsPath(), "utf8");
+    // Documented in docs/MINER.md and on the download page. If this ever stops
+    // being true, say so there too.
+    expect(settings).toContain(ROUTE.minerToken);
+    // A provider credential must never be anywhere near this file.
+    expect(settings).not.toMatch(/sk-(ant|or)-/);
+    expect(settings).not.toContain("ANTHROPIC_AUTH_TOKEN");
+  });
+});
+
 describe("disable on a machine USAGE never configured", () => {
   // The uninstaller calls `disable` for every tool unconditionally, so this is
   // the common case, not an edge case: most people uninstalling have not

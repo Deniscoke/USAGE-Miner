@@ -31,6 +31,21 @@ const run = promisify(execFile);
  * miner token travels in its own header instead, so nobody has to sign out of
  * anything.
  *
+ * KNOWN EXPOSURE, stated here rather than buried. Claude Code's settings file
+ * takes literal environment values; it has no way to name a credential held
+ * somewhere else, the way Codex's `env_key` does. So enabling mining writes
+ * this device's miner token into `settings.json` in plaintext.
+ *
+ * What that token can do: spend this user's own connected provider credit, and
+ * attribute usage to them. What it cannot do: reveal a provider API key -- those
+ * never leave the server -- or authenticate to anything but USAGE. It is
+ * revocable at /miners, and `disable` removes it again.
+ *
+ * It is still a second copy of a credential that is otherwise held under DPAPI,
+ * so it is documented in docs/MINER.md and on the download page rather than
+ * described as "never written to a config file", which would be false. The fix
+ * is a per-tool credential with a narrower scope, not a comment.
+ *
  * The file is strict JSON, so it is parsed and re-serialised rather than
  * patched textually, and every key that was already there is preserved.
  */
