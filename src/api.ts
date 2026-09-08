@@ -110,11 +110,17 @@ export function startPairing(
   });
 }
 
+/**
+ * Collect the credential once the user has approved.
+ *
+ * POST with the token in the body, never a query string: the poll token is a
+ * credential, and query strings end up in access logs, proxy logs and CDN logs.
+ */
 export function pollPairing(serverUrl: string, pollToken: string): Promise<PairingPollResponse> {
-  return request<PairingPollResponse>(
-    serverUrl,
-    `/api/miner/pair?poll_token=${encodeURIComponent(pollToken)}`,
-  );
+  return request<PairingPollResponse>(serverUrl, "/api/miner/pair/poll", {
+    method: "POST",
+    body: JSON.stringify({ pollToken }),
+  });
 }
 
 export function fetchConfig(serverUrl: string, token: string): Promise<MinerConfig> {
