@@ -10,6 +10,7 @@ import { codexAdapter } from "./tools/codex.js";
 import type { LocalToolAdapter } from "./tools/adapter.js";
 import { VERSION } from "./version.js";
 import { renderApp } from "./ui-page.js";
+import { migrateInsecureConfig } from "./migrate.js";
 
 /**
  * The desktop window.
@@ -40,6 +41,11 @@ interface ToolView {
   mining: boolean;
   conflict: string | null;
   experimental: boolean;
+  /**
+   * "launch"    started by USAGE; the credential lives in the child process
+   * "configure" its own config file can name the credential without holding it
+   */
+  mode: "launch" | "configure";
 }
 
 export interface AppState {
@@ -53,6 +59,8 @@ export interface AppState {
   pairing: { userCode: string; verificationUrl: string } | null;
   error: string | null;
   updateAvailable: boolean;
+  /** Set once, after an older build's credential has been cleaned up. */
+  securityNotice: string | null;
 }
 
 async function readTools(): Promise<ToolView[]> {
@@ -77,6 +85,7 @@ async function readTools(): Promise<ToolView[]> {
             : null,
       // Honest labelling: Codex has never been run live through USAGE.
       experimental: adapter.id === "codex",
+      mode: adapter.persistentConfig === "unsafe" ? "launch" : "configure",
     });
   }
   return views;
@@ -104,6 +113,19 @@ async function currentConfig(credential: StoredCredential): Promise<MinerConfig>
   return config;
 }
 
+/**
+ * Shown once, after an upgrade cleaned up an older build's credential.
+ *
+ * Held in memory rather than recomputed: the migration is idempotent, so it
+ * would report "nothing to do" on every subsequent poll and the user would
+ * never see what happened.
+ */
+let securityNotice: string | null = null;
+
+export function noteSecurityMigration(detail: string): void {
+  securityNotice = detail;
+}
+
 export async function buildState(pairing: AppState["pairing"] = null): Promise<AppState> {
   const state: AppState = {
     version: VERSION,
@@ -116,6 +138,7 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     pairing,
     error: null,
     updateAvailable: false,
+    securityNotice,
   };
 
   let credential: StoredCredential | null = null;
@@ -330,6 +353,18 @@ export async function startDesktop(): Promise<DesktopHandle> {
         const adapter = ADAPTERS.find((entry) => entry.id === body.tool);
         if (!adapter) return json(response, { error: "unknown_tool" }, 400);
 
+        // Enforced here as well as in the adapter. A local caller must not be
+        // able to reach a path the UI does not offer.
+        if (adapter.persistentConfig === "unsafe") {
+          return json(response, { error: "launch_only", message: "Use Start with USAGE." }, 400);
+        }
+
+        // A tool that is not installed gets no config file written for it.
+        const detection = await adapter.detect();
+        if (!detection.installed) {
+          return json(response, { error: "not_installed" }, 400);
+        }
+
         const credential = await loadCredential();
         if (!credential) return json(response, { error: "not_signed_in" }, 401);
 
@@ -353,6 +388,45 @@ export async function startDesktop(): Promise<DesktopHandle> {
           outcome: result.ok ? "ok" : "config_conflict",
         });
         json(response, { ...result, note: route.note });
+        return;
+      }
+
+      /**
+       * Start a tool with USAGE, in its own window.
+       *
+       * Spawned detached with a console of its own, because these are terminal
+       * programs and the desktop window is a browser tab. The credential goes
+       * into the child's environment and nowhere else -- not into a shortcut,
+       * not into a config file, not into this response.
+       */
+      if (url.pathname === "/launch" && request.method === "POST") {
+        const body = await readBody(request);
+        const adapter = ADAPTERS.find((entry) => entry.id === body.tool);
+        if (!adapter) return json(response, { error: "unknown_tool" }, 400);
+
+        const credential = await loadCredential();
+        if (!credential) return json(response, { error: "not_signed_in" }, 401);
+
+        const config = await currentConfig(credential);
+        const route = chooseRoute(config, adapter);
+        if (!route) {
+          return json(
+            response,
+            { error: "no_provider", message: "Connect an AI provider first." },
+            400,
+          );
+        }
+
+        // Through the miner's own executable, so the child is started by the
+        // same tested launcher the CLI uses rather than a second copy of it.
+        spawn(
+          "cmd",
+          ["/c", "start", `${adapter.displayName} — USAGE Mining`, process.execPath, "run", adapter.id],
+          { detached: true, stdio: "ignore" },
+        ).unref();
+
+        await logEvent({ event: "launch", tool: adapter.id, outcome: "ok" });
+        json(response, { ok: true, label: route.label, note: route.note });
         return;
       }
 
@@ -400,6 +474,15 @@ export async function startDesktop(): Promise<DesktopHandle> {
       json(response, { error: "internal", message: "Something went wrong." }, 500);
     }
   });
+
+  // Clean up an older build's on-disk credential before the window is usable.
+  // Not awaited by the listen call, but started here so the notice is present
+  // by the time the page makes its first /state request.
+  void migrateInsecureConfig()
+    .then((result) => {
+      if (result.changed) noteSecurityMigration(result.detail);
+    })
+    .catch(() => undefined);
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   port = (server.address() as { port: number }).port;

@@ -127,6 +127,20 @@ export function fetchConfig(serverUrl: string, token: string): Promise<MinerConf
   return request<MinerConfig>(serverUrl, "/api/miner/config", { token });
 }
 
+/**
+ * Replace this device's credential.
+ *
+ * Called after cleaning up a machine where an earlier build left the token in a
+ * plaintext config file. The old credential dies server-side in the same
+ * operation, so there is never a window with two live tokens.
+ */
+export function rotateCredential(
+  serverUrl: string,
+  token: string,
+): Promise<{ token: string; credentialId: string; previousRevoked: boolean }> {
+  return request(serverUrl, "/api/miner/credential/rotate", { method: "POST", token, body: "{}" });
+}
+
 export function sendHeartbeat(
   serverUrl: string,
   token: string,

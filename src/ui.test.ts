@@ -136,13 +136,45 @@ describe("the local desktop server", () => {
     expect(await response.json()).toEqual({ error: "unknown_tool" });
   });
 
-  it("refuses to enable mining before the device is signed in", async () => {
+  it("refuses to persistently configure Claude Code at all", async () => {
+    // The M12 rule, enforced at the loopback boundary as well as in the
+    // adapter: a local caller must not reach a path the UI does not offer.
     const response = await fetch(`${base}/enable?k=${nonce}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tool: "claude-code" }),
+    });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("launch_only");
+  });
+
+  it("will not write a config file for a tool that is not installed", async () => {
+    const response = await fetch(`${base}/enable?k=${nonce}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tool: "codex" }),
+    });
+    // Codex is absent on the machine running these tests; if it were present
+    // the next gate is sign-in, which is equally a refusal.
+    expect([400, 401]).toContain(response.status);
+    expect(["not_installed", "not_signed_in"]).toContain((await response.json()).error);
+  });
+
+  it("refuses to launch a tool before the device is signed in", async () => {
+    const response = await fetch(`${base}/launch?k=${nonce}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tool: "claude-code" }),
     });
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "not_signed_in" });
+  });
+
+  it("says which tools are launched rather than configured", async () => {
+    const state = await (await fetch(`${base}/state?k=${nonce}`)).json();
+    const claude = state.tools.find((tool: { id: string }) => tool.id === "claude-code");
+    const codex = state.tools.find((tool: { id: string }) => tool.id === "codex");
+    expect(claude.mode).toBe("launch");
+    expect(codex.mode).toBe("configure");
   });
 });

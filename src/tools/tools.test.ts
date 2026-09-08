@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { claudeCodeAdapter } from "./claude-code.js";
+import { claudeCodeAdapter, migrateLegacyCredential } from "./claude-code.js";
 import { codexAdapter, CODEX_MANAGED_MARKERS } from "./codex.js";
 import { scrubForLog } from "../log.js";
 
@@ -54,78 +54,49 @@ describe("Claude Code adapter", () => {
     expect(await claudeCodeAdapter.inspectRouting()).toEqual({ state: "off" });
   });
 
-  it("routes through USAGE without touching the user's other settings", async () => {
-    await writeClaudeSettings(
-      JSON.stringify({ model: "opus", permissions: { allow: ["Bash"] } }, null, 2),
-    );
+  it("refuses to configure itself, because that would mean a token on disk", async () => {
+    await writeClaudeSettings(JSON.stringify({ model: "opus" }, null, 2));
 
     const result = await claudeCodeAdapter.enableMining(ROUTE);
-    expect(result.ok).toBe(true);
 
-    const settings = await readClaudeSettings();
-    // Everything that was there is still there.
-    expect(settings.model).toBe("opus");
-    expect(settings.permissions).toEqual({ allow: ["Bash"] });
+    expect(result.ok).toBe(false);
+    expect(result.message).toMatch(/started by USAGE/i);
+    expect(claudeCodeAdapter.persistentConfig).toBe("unsafe");
+    // And it did not touch the file on the way to refusing.
+    expect(await readClaudeSettings()).toEqual({ model: "opus" });
+  });
 
-    const env = settings.env as Record<string, string>;
-    expect(env.ANTHROPIC_BASE_URL).toBe(ROUTE.url);
-    expect(env.ANTHROPIC_CUSTOM_HEADERS).toContain("x-usage-miner-token");
+  it("puts routing in the child process environment, not in a file", async () => {
+    const plan = claudeCodeAdapter.launchPlan(ROUTE);
+
+    expect(plan.command).toBe("claude");
+    expect(plan.env.ANTHROPIC_BASE_URL).toBe(ROUTE.url);
+    expect(plan.env.ANTHROPIC_CUSTOM_HEADERS).toContain(ROUTE.minerToken);
     // Empty, so a signed-in Claude subscription keeps working.
-    expect(env.ANTHROPIC_API_KEY).toBe("");
+    expect(plan.env.ANTHROPIC_API_KEY).toBe("");
     // Never set: it would replace the user's own Authorization header.
-    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-  });
+    expect(plan.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
 
-  it("restores the file byte-for-byte on disable", async () => {
-    const original = { model: "opus", env: { FOO: "bar" } };
-    await writeClaudeSettings(JSON.stringify(original, null, 2));
-
-    await claudeCodeAdapter.enableMining(ROUTE);
-    await claudeCodeAdapter.disableMining();
-
-    expect(await readClaudeSettings()).toEqual(original);
-  });
-
-  it("removes the file entirely when USAGE created it", async () => {
-    await claudeCodeAdapter.enableMining(ROUTE);
-    await claudeCodeAdapter.disableMining();
-
-    // The machine is exactly as it was: no leftover file.
+    // Nothing was written anywhere as a side effect of planning a launch.
     await expect(readFile(claudeSettingsPath(), "utf8")).rejects.toThrow();
   });
 
-  it("refuses to overwrite a custom endpoint without consent", async () => {
-    await writeClaudeSettings(
-      JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://my-own-proxy.example.com" } }, null, 2),
+
+  it("leaves somebody else's proxy configuration alone", async () => {
+    const original = JSON.stringify(
+      { env: { ANTHROPIC_BASE_URL: "https://my-own-proxy.example.com" } },
+      null,
+      2,
     );
+    await writeClaudeSettings(original);
 
-    const result = await claudeCodeAdapter.enableMining(ROUTE);
-    expect(result.ok).toBe(false);
-    expect(result.requiresConfirmation).toBe(true);
-
-    // Untouched until the user says so.
-    const settings = await readClaudeSettings();
-    expect((settings.env as Record<string, string>).ANTHROPIC_BASE_URL).toBe(
-      "https://my-own-proxy.example.com",
-    );
-
-    const forced = await claudeCodeAdapter.enableMining(ROUTE, true);
-    expect(forced.ok).toBe(true);
-  });
-
-  it("refuses to touch a settings file it cannot parse", async () => {
-    await writeClaudeSettings("{ this is not json ");
-
-    const result = await claudeCodeAdapter.enableMining(ROUTE);
-    expect(result.ok).toBe(false);
-    // The user's file is left exactly as they left it.
-    expect(await readFile(claudeSettingsPath(), "utf8")).toBe("{ this is not json ");
-  });
-
-  it("reports health from the configuration it actually finds", async () => {
-    expect((await claudeCodeAdapter.healthCheck()).ok).toBe(false);
     await claudeCodeAdapter.enableMining(ROUTE);
-    expect((await claudeCodeAdapter.healthCheck()).ok).toBe(true);
+
+    expect(await readFile(claudeSettingsPath(), "utf8")).toBe(original);
+    expect(await claudeCodeAdapter.inspectRouting()).toEqual({
+      state: "foreign",
+      url: "https://my-own-proxy.example.com",
+    });
   });
 });
 
@@ -145,15 +116,18 @@ describe("where the miner token does and does not land", () => {
     expect(config).toContain('env_key = "USAGE_MINER_TOKEN"');
   });
 
-  it("Claude Code embeds it, because its settings file has no indirection", async () => {
+  it("Claude Code writes nothing at all, so there is nothing to leak", async () => {
+    // The property M12 exists to establish. Earlier builds embedded the token
+    // here because Claude Code's settings file has no `env_key` equivalent;
+    // the answer is not to write the file.
     await claudeCodeAdapter.enableMining(ROUTE);
-    const settings = await readFile(claudeSettingsPath(), "utf8");
-    // Documented in docs/MINER.md and on the download page. If this ever stops
-    // being true, say so there too.
-    expect(settings).toContain(ROUTE.minerToken);
-    // A provider credential must never be anywhere near this file.
-    expect(settings).not.toMatch(/sk-(ant|or)-/);
-    expect(settings).not.toContain("ANTHROPIC_AUTH_TOKEN");
+    await expect(readFile(claudeSettingsPath(), "utf8")).rejects.toThrow();
+
+    // And the credential the launcher passes never reaches a config file --
+    // it exists only in the environment handed to the child process.
+    const plan = claudeCodeAdapter.launchPlan(ROUTE);
+    expect(JSON.stringify(plan.env)).toContain(ROUTE.minerToken);
+    await expect(readFile(claudeSettingsPath(), "utf8")).rejects.toThrow();
   });
 });
 
@@ -277,5 +251,110 @@ describe("logging never carries a credential", () => {
 
   it("leaves ordinary messages alone", () => {
     expect(scrubForLog("Claude Code is not installed")).toBe("Claude Code is not installed");
+  });
+});
+
+describe("migrating a machine an older build wrote a credential onto", () => {
+  /** Exactly what builds before 0.3.0 left behind. */
+  async function writeLegacyExposure(extra: Record<string, unknown> = {}): Promise<void> {
+    await writeClaudeSettings(
+      JSON.stringify(
+        {
+          ...extra,
+          env: {
+            ANTHROPIC_BASE_URL: ROUTE.url,
+            ANTHROPIC_API_KEY: "",
+            ANTHROPIC_CUSTOM_HEADERS: `x-usage-miner-token: ${ROUTE.minerToken}`,
+          },
+        },
+        null,
+        2,
+      ),
+    );
+  }
+
+  it("removes the credential and reports that it did", async () => {
+    await writeLegacyExposure({ model: "opus" });
+
+    const result = await migrateLegacyCredential();
+
+    expect(result.migrated).toBe(true);
+    const after = await readFile(claudeSettingsPath(), "utf8");
+    expect(after).not.toContain(ROUTE.minerToken);
+    expect(after).not.toContain("x-usage-miner-token");
+  });
+
+  it("keeps unrelated Claude configuration exactly", async () => {
+    await writeLegacyExposure({ model: "opus", permissions: { allow: ["Bash"] } });
+
+    await migrateLegacyCredential();
+
+    const settings = await readClaudeSettings();
+    expect(settings.model).toBe("opus");
+    expect(settings.permissions).toEqual({ allow: ["Bash"] });
+  });
+
+  it("is idempotent: a second run changes nothing", async () => {
+    await writeLegacyExposure({ model: "opus" });
+
+    const first = await migrateLegacyCredential();
+    const afterFirst = await readFile(claudeSettingsPath(), "utf8");
+    const second = await migrateLegacyCredential();
+
+    expect(first.migrated).toBe(true);
+    expect(second.migrated).toBe(false);
+    expect(await readFile(claudeSettingsPath(), "utf8")).toBe(afterFirst);
+  });
+
+  it("does nothing on a machine that was never affected", async () => {
+    const original = `{\n  "model": "opus"\n}`;
+    await writeClaudeSettings(original);
+
+    const result = await migrateLegacyCredential();
+
+    expect(result.migrated).toBe(false);
+    expect(await readFile(claudeSettingsPath(), "utf8")).toBe(original);
+  });
+
+  it("leaves a foreign endpoint alone rather than claiming it as ours", async () => {
+    // Somebody else's proxy is not an exposure to clean up, and rewriting it
+    // would be this tool breaking a configuration it does not own.
+    const original = JSON.stringify(
+      { env: { ANTHROPIC_BASE_URL: "https://someone-elses.example" } },
+      null,
+      2,
+    );
+    await writeClaudeSettings(original);
+
+    const result = await migrateLegacyCredential();
+
+    expect(result.migrated).toBe(false);
+    expect(await readFile(claudeSettingsPath(), "utf8")).toBe(original);
+  });
+
+  it("restores the rollback copy when one exists", async () => {
+    const original = { model: "opus", env: { FOO: "bar" } };
+    await writeClaudeSettings(JSON.stringify(original, null, 2));
+    // Simulate what the old enable path recorded before it overwrote the file.
+    await mkdir(process.env.APPDATA!, { recursive: true });
+    await writeFile(
+      path.join(process.env.APPDATA!, "USAGE", "claude-code.backup.json"),
+      JSON.stringify({ existed: true, settings: original }, null, 2),
+      "utf8",
+    ).catch(async () => {
+      await mkdir(path.join(process.env.APPDATA!, "USAGE"), { recursive: true });
+      await writeFile(
+        path.join(process.env.APPDATA!, "USAGE", "claude-code.backup.json"),
+        JSON.stringify({ existed: true, settings: original }, null, 2),
+        "utf8",
+      );
+    });
+    await writeLegacyExposure({ model: "opus" });
+
+    const result = await migrateLegacyCredential();
+
+    expect(result.migrated).toBe(true);
+    expect(result.restoredFromBackup).toBe(true);
+    expect(await readClaudeSettings()).toEqual(original);
   });
 });

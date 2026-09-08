@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { readFile, writeFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -31,20 +31,20 @@ const run = promisify(execFile);
  * miner token travels in its own header instead, so nobody has to sign out of
  * anything.
  *
- * KNOWN EXPOSURE, stated here rather than buried. Claude Code's settings file
- * takes literal environment values; it has no way to name a credential held
- * somewhere else, the way Codex's `env_key` does. So enabling mining writes
- * this device's miner token into `settings.json` in plaintext.
+ * LAUNCH-ONLY, AND WHY. Claude Code's settings file takes literal environment
+ * values. It has no way to name a credential held somewhere else, the way
+ * Codex's `env_key` does, so persistent routing would mean writing this
+ * device's miner token into `settings.json` in plaintext -- a second copy of a
+ * credential that is otherwise held under DPAPI, sitting in a file that gets
+ * copied into dotfile repositories and pasted into bug reports.
  *
- * What that token can do: spend this user's own connected provider credit, and
- * attribute usage to them. What it cannot do: reveal a provider API key -- those
- * never leave the server -- or authenticate to anything but USAGE. It is
- * revocable at /miners, and `disable` removes it again.
+ * So this adapter does not offer persistent configuration at all. `enableMining`
+ * refuses and says why. Routing happens in `launchPlan`: the miner starts Claude
+ * Code itself and puts the credential in that child process's environment, where
+ * it lives for the session and is gone when the process exits.
  *
- * It is still a second copy of a credential that is otherwise held under DPAPI,
- * so it is documented in docs/MINER.md and on the download page rather than
- * described as "never written to a config file", which would be false. The fix
- * is a per-tool credential with a narrower scope, not a comment.
+ * `disableMining` stays, because earlier builds DID write the token here and
+ * those machines have to be cleaned up. See `migrateLegacyCredential`.
  *
  * The file is strict JSON, so it is parsed and re-serialised rather than
  * patched textually, and every key that was already there is preserved.
@@ -122,49 +122,41 @@ export const claudeCodeAdapter: LocalToolAdapter = {
       : { state: "foreign", url: baseUrl };
   },
 
-  async enableMining(route: RouteConfig, force = false): Promise<EnableResult> {
-    const current = await readSettings();
-    if (!current) {
-      return {
-        ok: false,
-        message:
-          "Your Claude Code settings.json is not valid JSON. Fix or remove it, then try again — USAGE will not overwrite it.",
-      };
-    }
+  persistentConfig: "unsafe",
 
-    const routing = await this.inspectRouting();
-    if (routing.state === "foreign" && !force) {
-      return {
-        ok: false,
-        requiresConfirmation: true,
-        message: `Claude Code already routes to ${routing.url}. Enabling USAGE will replace that. Re-run with --force to confirm.`,
-      };
-    }
-
-    // The rollback copy records what was there, including "there was no file".
-    await mkdir(configDir(), { recursive: true });
-    await writeFile(
-      backupPath(),
-      JSON.stringify({ existed: current.existed, settings: current.settings }, null, 2),
-      "utf8",
-    );
-
-    const settings: ClaudeSettings = {
-      ...current.settings,
+  /**
+   * Routing for one session, in the child's environment only.
+   *
+   * ANTHROPIC_API_KEY is set empty on purpose: Claude Code checks it first, and
+   * an empty value means "use the credential you are already signed in with",
+   * which keeps a Claude subscription working. ANTHROPIC_AUTH_TOKEN is never
+   * set -- it would replace the user's own Authorization header.
+   */
+  launchPlan(route: RouteConfig) {
+    return {
+      command: "claude",
       env: {
-        ...current.settings.env,
         ANTHROPIC_BASE_URL: route.url,
-        // Claude Code checks ANTHROPIC_API_KEY first; empty means "use the
-        // credential you already have", which keeps a subscription signed in.
         ANTHROPIC_API_KEY: "",
         ANTHROPIC_CUSTOM_HEADERS: `${HEADER_NAME}: ${route.minerToken}`,
       },
     };
+  },
 
-    await mkdir(claudeDir(), { recursive: true });
-    await writeFile(settingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-
-    return { ok: true, message: `Claude Code now mines through ${route.label}.` };
+  /**
+   * Refused, deliberately.
+   *
+   * There is no way to do this for Claude Code without leaving a credential on
+   * disk, so it is not offered. Removed rather than kept behind a warning: a
+   * beta that ships an unsafe path because it used to exist is a beta that
+   * ships an unsafe path.
+   */
+  async enableMining(): Promise<EnableResult> {
+    return {
+      ok: false,
+      message:
+        "Claude Code is started by USAGE rather than configured, so no credential is ever written to disk. Use “Start with USAGE”, or run: usage run claude-code",
+    };
   },
 
   async disableMining(): Promise<EnableResult> {
@@ -222,3 +214,63 @@ export const claudeCodeAdapter: LocalToolAdapter = {
     return { ok: false, detail: routing.reason };
   },
 };
+
+/**
+ * Clean up a machine an earlier build wrote a credential onto.
+ *
+ * Builds before 0.3.0 routed Claude Code by writing this device's miner token
+ * into `settings.json`. Upgrading has to remove it -- an upgrade that silently
+ * leaves the old exposure in place is not a fix.
+ *
+ * Safe and idempotent, in that order:
+ *
+ *   * it only acts when the settings actually carry OUR header, so a file the
+ *     user wrote, or one pointing at somebody else's proxy, is never touched;
+ *   * it restores the rollback copy when there is one, so unrelated Claude
+ *     configuration comes back exactly as it was;
+ *   * with no rollback copy it removes only the three keys USAGE sets;
+ *   * running it again on a clean machine does nothing and says so.
+ *
+ * It never reads the old token's value and never returns it. Whether it is
+ * still valid is not this function's business: the caller rotates the device
+ * credential afterwards, because a secret that has been sitting in a plaintext
+ * file must be assumed to have been read.
+ */
+export async function migrateLegacyCredential(): Promise<{
+  migrated: boolean;
+  restoredFromBackup: boolean;
+  detail: string;
+}> {
+  const routing = await claudeCodeAdapter.inspectRouting();
+  if (routing.state !== "usage") {
+    return {
+      migrated: false,
+      restoredFromBackup: false,
+      detail:
+        routing.state === "unreadable"
+          ? "Claude Code settings could not be read; left untouched."
+          : "No USAGE credential found in Claude Code settings.",
+    };
+  }
+
+  let hadBackup = false;
+  try {
+    await readFile(backupPath(), "utf8");
+    hadBackup = true;
+  } catch {
+    hadBackup = false;
+  }
+
+  const result = await claudeCodeAdapter.disableMining();
+  if (!result.ok) {
+    return { migrated: false, restoredFromBackup: false, detail: result.message };
+  }
+
+  return {
+    migrated: true,
+    restoredFromBackup: hadBackup,
+    detail: hadBackup
+      ? "Removed the stored credential and restored your previous Claude Code settings."
+      : "Removed the stored credential from Claude Code settings.",
+  };
+}

@@ -63,6 +63,14 @@ static class Setup {
         }
     }
 
+    static string ClaudeShortcut {
+        get {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Programs),
+                "Claude Code - USAGE Mining.lnk");
+        }
+    }
+
     static string TargetExe { get { return Path.Combine(InstallDir, ExeName); } }
     static string SetupCopy { get { return Path.Combine(InstallDir, "uninstall.exe"); } }
 
@@ -115,7 +123,17 @@ static class Setup {
         File.Copy(Assembly.GetExecutingAssembly().Location, SetupCopy, true);
 
         CreateShortcut(StartMenuShortcut, TargetExe, InstallDir,
-            "Route your AI tools through USAGE");
+            "Route your AI tools through USAGE", "");
+
+        // A second entry that starts Claude Code through USAGE directly.
+        //
+        // It holds an argument, not a credential: "run claude-code" tells the
+        // miner which tool to launch, and the miner then decrypts its own
+        // credential with DPAPI and passes it to the child process. A .lnk is
+        // world-readable within the profile and gets copied around, so nothing
+        // secret may ever be stored in one.
+        CreateShortcut(ClaudeShortcut, TargetExe, InstallDir,
+            "Start Claude Code with USAGE mining", "run claude-code");
 
         // HKCU only: this is a per-user install, and Add/Remove Programs reads
         // the current user's hive as well as the machine's.
@@ -171,6 +189,7 @@ static class Setup {
         }
 
         try { File.Delete(StartMenuShortcut); } catch {}
+        try { File.Delete(ClaudeShortcut); } catch {}
         try { File.Delete(TargetExe); } catch {}
         try {
             Registry.CurrentUser.DeleteSubKeyTree(
@@ -209,7 +228,8 @@ static class Setup {
 
     // Late-bound WScript.Shell: a .lnk with no COM reference and no extra
     // assembly to ship.
-    static void CreateShortcut(string linkPath, string target, string workingDir, string comment) {
+    static void CreateShortcut(string linkPath, string target, string workingDir, string comment,
+                               string arguments) {
         Type shellType = Type.GetTypeFromProgID("WScript.Shell");
         if (shellType == null) return;
         object shell = Activator.CreateInstance(shellType);
@@ -222,6 +242,9 @@ static class Setup {
             new object[] { workingDir });
         linkType.InvokeMember("Description", BindingFlags.SetProperty, null, link,
             new object[] { comment });
+        // Arguments only ever select a tool. Never a token, never a URL.
+        linkType.InvokeMember("Arguments", BindingFlags.SetProperty, null, link,
+            new object[] { arguments });
         linkType.InvokeMember("Save", BindingFlags.InvokeMethod, null, link, null);
     }
 

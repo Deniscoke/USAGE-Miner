@@ -1,0 +1,28 @@
+USAGE Miner
+Copyright 2026 USAGE
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+---
+
+The Apache License grants no rights to the "USAGE" name, logo, or any other
+trademark. Fork this, change it, ship it -- but a build that is not ours must
+not present itself as ours. That is not a legal formality here: the whole point
+of this program is that a user can tell which software is holding their
+credential and talking to their AI provider.
+
+The USAGE platform itself -- reward policy, pricing snapshots, provider secret
+storage, receipt signing, and epoch settlement -- is a separate, private
+codebase and is NOT covered by this License. This repository contains only the
+client, and depends on the platform solely through its documented public HTTP
+API.

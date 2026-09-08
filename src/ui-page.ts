@@ -160,6 +160,9 @@ export function renderApp(nonce: string): string {
     if (state.updateAvailable) {
       acct.appendChild(el("div", "note", "A newer USAGE Miner is available."));
     }
+    if (state.securityNotice) {
+      acct.appendChild(el("div", "note", "Security update: " + state.securityNotice));
+    }
     app.appendChild(acct);
 
     var prov = el("div", "card");
@@ -191,12 +194,26 @@ export function renderApp(nonce: string): string {
         !t.installed ? "Not installed"
           : t.conflict ? t.conflict
           : t.mining ? "Mining through USAGE"
-          : "Installed" + (t.version ? " · " + t.version : "")));
+          : t.mode === "launch"
+            ? "Started by USAGE — nothing is written to disk"
+            : "Installed" + (t.version ? " · " + t.version : "")));
       row.appendChild(left);
 
       var right = el("div");
       if (!t.installed) {
         right.appendChild(el("span", "tag off", "—"));
+      } else if (t.mode === "launch") {
+        // No enable button at all for a tool USAGE starts itself. There is
+        // nothing to turn on: routing exists for the life of the session.
+        var start = el("button", "primary", "Start with USAGE");
+        start.onclick = function () {
+          act(function () {
+            return api("/launch", { tool: t.id }).then(function (r) {
+              if (r && r.error) window.alert(r.message || "Could not start it.");
+            });
+          });
+        };
+        right.appendChild(start);
       } else if (t.mining) {
         var off = el("button", null, "Turn off");
         off.onclick = function () { act(function () { return api("/disable", { tool: t.id }); }); };
@@ -221,7 +238,7 @@ export function renderApp(nonce: string): string {
       tools.appendChild(row);
     });
     tools.appendChild(el("div", "note",
-      "Enabling changes two settings in the tool's own config file, and backs up what was there. Turning mining off puts it back exactly."));
+      "Tools USAGE starts get their routing in that session's environment — no credential is written to disk, and it is gone when the tool closes. Tools that are configured have their own config file edited, which can name the credential but never contains it; what was there is backed up, and turning mining off puts it back exactly."));
     app.appendChild(tools);
 
     appendFooter(state);

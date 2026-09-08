@@ -110,6 +110,33 @@ export const codexAdapter: LocalToolAdapter = {
   displayName: "Codex",
   protocol: "openai_compatible",
 
+  /**
+   * Safe, and kept that way.
+   *
+   * Codex's config names the credential (`env_key = "USAGE_MINER_TOKEN"`)
+   * rather than containing it, so persistent configuration here writes no
+   * secret to disk. Claude Code's limitation is Claude Code's; there is no
+   * reason to inflict it on a tool that got this right.
+   *
+   * Persistent mode still needs the variable to be set when Codex runs, which
+   * is what the launcher does -- so `usage run codex` remains the reliable path
+   * and the reason both modes exist.
+   */
+  persistentConfig: "safe",
+
+  launchPlan(route: RouteConfig) {
+    return {
+      command: "codex",
+      env: {
+        USAGE_MINER_TOKEN: route.minerToken,
+        // Codex reads its endpoint from config, not the environment; this is
+        // recorded so a launched session is self-describing rather than
+        // depending on a config file having been written earlier.
+        USAGE_ROUTE_URL: route.url,
+      },
+    };
+  },
+
   async detect(): Promise<ToolDetection> {
     let version: string | null = null;
     let installed = false;

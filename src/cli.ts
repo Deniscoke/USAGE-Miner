@@ -12,6 +12,7 @@ import {
   type MinerRoute,
 } from "./api.js";
 import { logEvent } from "./log.js";
+import { migrateInsecureConfig } from "./migrate.js";
 import {
   clearCredential,
   loadCredential,
@@ -168,6 +169,12 @@ async function signIn(): Promise<void> {
 
 async function status(): Promise<void> {
   const credential = await requireCredential();
+  // Cleanup runs where a user will see the result, not silently at startup.
+  const migration = await migrateInsecureConfig();
+  if (migration.changed) {
+    out("");
+    out(`  SECURITY UPDATE  ${migration.detail}`);
+  }
   const config = await fetchConfig(serverUrl(credential), credential.token);
 
   out("");
@@ -230,6 +237,17 @@ async function enable(toolId: string, force: boolean): Promise<void> {
   const adapter = adapterFor(toolId);
   if (!adapter) {
     out(`Unknown tool: ${toolId}. Supported: ${ADAPTERS.map((a) => a.id).join(", ")}`);
+    process.exit(1);
+  }
+
+  if (adapter.persistentConfig === "unsafe") {
+    out("");
+    out(`  ${adapter.displayName} is started by USAGE rather than configured.`);
+    out("  That is deliberate: there is no way to configure it persistently");
+    out("  without leaving a credential in a file on this machine.");
+    out("");
+    out(`  Use:  usage run ${adapter.id}`);
+    out("");
     process.exit(1);
   }
 
@@ -309,6 +327,13 @@ async function runTool(toolId: string, args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Before anything is launched: if an older build left a credential on disk,
+  // remove it and rotate. Launching first would mine with a token that is
+  // still sitting in a plaintext file.
+  const migration = await migrateInsecureConfig();
+  if (migration.changed) out(`
+  SECURITY UPDATE  ${migration.detail}`);
+
   const credential = await requireCredential();
   const config = await fetchConfig(serverUrl(credential), credential.token);
   const route = chooseRoute(config, adapter);
@@ -317,25 +342,31 @@ async function runTool(toolId: string, args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (adapter.id === "claude-code") {
-    env.ANTHROPIC_BASE_URL = route.url;
-    // Empty so Claude Code keeps using the account it is already signed in to.
-    env.ANTHROPIC_API_KEY = "";
-    env.ANTHROPIC_CUSTOM_HEADERS = `x-usage-miner-token: ${credential.token}`;
-  } else {
-    env.USAGE_MINER_TOKEN = credential.token;
-  }
+  // The adapter decides what the child needs. The credential exists only in
+  // this environment object and in the child's process environment; nothing is
+  // written to disk, and both die when the tool exits.
+  const plan = adapter.launchPlan({
+    url: route.url,
+    minerToken: credential.token,
+    label: route.label,
+  });
+  const env: NodeJS.ProcessEnv = { ...process.env, ...plan.env };
 
   out("");
   out(`  Starting ${adapter.displayName} with USAGE (${route.label}).`);
   out(`  Mining: ${route.eligibility}`);
   if (route.note) out(`  ${route.note}`);
-  out("  This session only — nothing on your machine is changed.");
+  out("  Session only — no credential is written to disk.");
   out("");
 
-  const command = adapter.id === "claude-code" ? "claude" : "codex";
-  const child = spawn(command, args, { stdio: "inherit", env, shell: true });
+  const child = spawn(plan.command, args, { stdio: "inherit", env, shell: true });
+
+  // Drop this process's own references once the child holds its copy. It does
+  // not scrub the string from the heap -- V8 offers no such guarantee, and
+  // pretending otherwise would be theatre -- but nothing here keeps it alive
+  // for the lifetime of a session that may run for hours.
+  for (const key of Object.keys(plan.env)) delete plan.env[key];
+
   child.on("exit", (code) => process.exit(code ?? 0));
 }
 

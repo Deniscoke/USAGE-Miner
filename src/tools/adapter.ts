@@ -16,6 +16,21 @@
  * 2. NOTHING HERE IS REMOTELY STEERABLE. Adapters ship compiled into the miner.
  *    The server sends declarative routing values (a URL, a protocol, a
  *    connection id) and never anything that decides *what runs*.
+ *
+ * 3. A CREDENTIAL NEVER GOES INTO A FILE. Two ways to route a tool, and an
+ *    adapter says which one it can honestly offer:
+ *
+ *    LAUNCHED   the miner starts the tool and puts the credential in that
+ *               child process's environment. It exists while the tool runs and
+ *               is gone when it exits. Nothing on disk.
+ *
+ *    CONFIGURED the tool's own config file is edited -- and may only reference
+ *               a credential by name, never contain one. Codex can do this
+ *               (`env_key`); Claude Code cannot, so it is launch-only.
+ *
+ *    An adapter that cannot configure without writing a secret must report
+ *    `persistentConfig: "unsafe"` and refuse. That is not a limitation to work
+ *    around; it is the rule being enforced.
  */
 
 export type ToolId = "claude-code" | "codex";
@@ -51,11 +66,34 @@ export interface EnableResult {
   message: string;
 }
 
+/**
+ * Whether this tool can be routed by editing its config file.
+ *
+ *   "safe"    its config can name a credential rather than contain one
+ *   "unsafe"  routing it persistently would mean writing a secret to disk
+ */
+export type PersistentConfigSupport = "safe" | "unsafe";
+
+/** How the miner starts a tool for one session. */
+export interface LaunchPlan {
+  /** The executable to run. Fixed per adapter, never server-supplied. */
+  command: string;
+  /**
+   * Environment for the child only. Carries the credential, and dies with the
+   * process -- which is the entire point.
+   */
+  env: Record<string, string>;
+}
+
 export interface LocalToolAdapter {
   readonly id: ToolId;
   readonly displayName: string;
   /** The wire format this tool speaks, so the core can pick a valid route. */
   readonly protocol: "anthropic_compatible" | "openai_compatible";
+  /** Whether `enableMining` can work without putting a secret on disk. */
+  readonly persistentConfig: PersistentConfigSupport;
+  /** Session-scoped routing, for the launcher. Nothing is written anywhere. */
+  launchPlan(route: RouteConfig): LaunchPlan;
 
   detect(): Promise<ToolDetection>;
   inspectRouting(): Promise<RoutingState>;
