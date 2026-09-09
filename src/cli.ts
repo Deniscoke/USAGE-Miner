@@ -393,7 +393,9 @@ async function disable(toolId: string): Promise<void> {
  * variables that die with the child process. Safer than editing a config file,
  * and the right default for anyone who wants to try mining without committing.
  */
-async function runTool(toolId: string, args: string[]): Promise<void> {
+async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
+  const noRoute = rawArgs.includes("--no-route");
+  const args = rawArgs.filter((a) => a !== "--no-route");
   const adapter = adapterFor(toolId);
   if (!adapter) {
     out(`Unknown tool: ${toolId}. Supported: ${ADAPTERS.map((a) => a.id).join(", ")}`);
@@ -415,8 +417,11 @@ async function runTool(toolId: string, args: string[]): Promise<void> {
   // Routing, when the tool speaks a protocol USAGE can carry and the account
   // has a connection for it. Optional: a tool can be metered without being
   // routed, and the user may have connected nothing.
+  // `--no-route`: meter only. Native telemetry does not need USAGE in the
+  // request path, and a user may prefer their tool to talk to its provider
+  // directly while still tracking usage. Routing stays the stronger proof.
   const config = await fetchConfig(serverUrl(credential), credential.token);
-  const route = adapter.protocol === "none" ? null : chooseRoute(config, adapter);
+  const route = adapter.protocol === "none" || noRoute ? null : chooseRoute(config, adapter);
 
   const env: NodeJS.ProcessEnv = { ...process.env };
   const extraArgs: string[] = [];
@@ -502,6 +507,7 @@ function help(): void {
     usage enable <tool>        route a tool through USAGE  (--force to override)
     usage disable <tool>       put the tool's configuration back
     usage run <tool> [args]    start a tool with USAGE for this session only
+                               (--no-route: meter from telemetry, do not route)
     usage map <tool>           allow USAGE to meter this tool (per-tool opt-in)
     usage unmap <tool>         stop metering this tool
     usage sign-out             forget this device's credential
@@ -519,6 +525,9 @@ function help(): void {
  * share this exact implementation: one binary, one code path, no second copy
  * of the pairing or tool logic to drift.
  */
+/** Every command `runCli` understands. The packaged entry point must accept all of them. */
+export const CLI_COMMAND_NAMES = ["sign-in", "status", "enable", "disable", "run", "map", "unmap", "sign-out", "version"] as const;
+
 export async function runCli(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   const force = rest.includes("--force");

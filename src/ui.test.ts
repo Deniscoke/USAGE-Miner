@@ -4,6 +4,16 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { renderApp } from "./ui-page.js";
 import { startDesktop, type DesktopHandle } from "./ui.js";
+import { CLI_COMMANDS } from "./app.js";
+import { CLI_COMMAND_NAMES } from "./cli.js";
+
+describe("the packaged entry point", () => {
+  it("accepts every CLI command, so none is silently unreachable from the exe", () => {
+    // Found by the M13 acceptance run: `map` existed in the CLI and the
+    // installed executable answered "unknown command".
+    for (const name of CLI_COMMAND_NAMES) expect(CLI_COMMANDS.has(name), name).toBe(true);
+  });
+});
 
 /**
  * The desktop window is a local HTTP server, which makes it the one part of the

@@ -11,12 +11,14 @@ import { startDesktop } from "./ui.js";
  * answer, and so the two surfaces can never disagree -- they are the same code.
  */
 
-const CLI_COMMANDS = new Set([
+export const CLI_COMMANDS = new Set([
   "sign-in",
   "status",
   "enable",
   "disable",
   "run",
+  "map",
+  "unmap",
   "sign-out",
   "version",
   "help",
@@ -43,7 +45,7 @@ async function main(): Promise<void> {
   process.exit(1);
 }
 
-main().catch((error: unknown) => {
+if (process.env.VITEST === undefined) main().catch((error: unknown) => {
   // A crash message is not a place for detail: it is the one output most likely
   // to be pasted into a public bug report.
   process.stdout.write(`USAGE Miner could not start: ${(error as Error).message}\n`);
