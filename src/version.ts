@@ -1,3 +1,3 @@
 /** Kept in step with miner/package.json and src/lib/miner/release.ts. */
-export const VERSION = "0.3.1";
-export const PROTOCOL_VERSION = "miner-protocol-v1";
+export const VERSION = "0.4.0";
+export const PROTOCOL_VERSION = "miner-protocol-v2";

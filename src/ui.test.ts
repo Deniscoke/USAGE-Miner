@@ -100,13 +100,17 @@ describe("the local desktop server", () => {
     expect(state.tools.map((tool: { id: string }) => tool.id).sort()).toEqual([
       "claude-code",
       "codex",
+      "cursor",
+      "gemini-cli",
     ]);
   });
 
   it("never returns a credential to the page", async () => {
     const body = await (await fetch(`${base}/state?k=${nonce}`)).text();
     expect(body).not.toMatch(/usgm_/);
-    expect(body).not.toMatch(/token/i);
+    expect(body).not.toMatch(/sessionSecret|Bearer /);
+    // The word "token" is legitimate copy ("Token counts"); the credential
+    // prefix and the receiver's session secret are what must never appear.
   });
 
   it("opens only allowlisted destinations", async () => {

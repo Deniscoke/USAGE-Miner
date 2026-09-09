@@ -23,8 +23,15 @@ import {
 } from "./secrets.js";
 import { claudeCodeAdapter } from "./tools/claude-code.js";
 import { codexAdapter } from "./tools/codex.js";
+import { geminiCliAdapter } from "./tools/gemini-cli.js";
+import { cursorAdapter } from "./tools/cursor.js";
 import type { LocalToolAdapter } from "./tools/adapter.js";
 import { VERSION } from "./version.js";
+import { isMapped, setMapped } from "./mappings.js";
+import { loadDeviceKey } from "./device-key.js";
+import { startMeteringSession } from "./telemetry/session.js";
+import { setMapping, registerDeviceKey } from "./api.js";
+import { platform as osPlatform, release as osRelease } from "node:os";
 
 /**
  * USAGE Miner.
@@ -40,7 +47,7 @@ import { VERSION } from "./version.js";
  * just not their problem.
  */
 
-const ADAPTERS: LocalToolAdapter[] = [claudeCodeAdapter, codexAdapter];
+const ADAPTERS: LocalToolAdapter[] = [claudeCodeAdapter, geminiCliAdapter, codexAdapter, cursorAdapter];
 
 function out(text = ""): void {
   process.stdout.write(`${text}\n`);
@@ -228,7 +235,73 @@ async function status(): Promise<void> {
   out("  USAGE measures compute metadata, not your prompts.");
   out("");
 
-  await sendHeartbeat(serverUrl(credential), credential.token, enabled).catch(() => undefined);
+  await sendHeartbeat(
+    serverUrl(credential),
+    credential.token,
+    await heartbeatTools(),
+    `${osPlatform()} ${osRelease()}`,
+    VERSION,
+  ).catch(() => undefined);
+}
+
+/** Safe device state for the heartbeat: ids, versions, flags. Nothing else. */
+async function heartbeatTools() {
+  const tools = [];
+  for (const adapter of ADAPTERS) {
+    const detection = await adapter.detect();
+    tools.push({
+      tool: adapter.id,
+      version: detection.version,
+      detected: detection.installed,
+      mapped: await isMapped(adapter.id),
+    });
+  }
+  return tools;
+}
+
+// ------------------------------------------------------------------ map
+
+/**
+ * Opt a tool in to (or out of) metering.
+ *
+ * Two records, one decision: the device remembers it locally so the launcher
+ * honours it, and the server records it so the web account shows it. The
+ * server's response says how it will meter the tool and what the ceiling on
+ * verification is -- the device never asserts either.
+ */
+async function map(toolId: string, enabled: boolean): Promise<void> {
+  const adapter = adapterFor(toolId);
+  if (!adapter) {
+    out(`Unknown tool: ${toolId}. Supported: ${ADAPTERS.map((a) => a.id).join(", ")}`);
+    process.exit(1);
+  }
+  const capabilities = adapter.capabilities();
+  if (capabilities.meteringMethods.includes("unsupported")) {
+    out(`${adapter.displayName} cannot be metered from this machine.`);
+    if (capabilities.availabilityNote) out(`  ${capabilities.availabilityNote}`);
+    process.exit(1);
+  }
+
+  const credential = await requireCredential();
+  const detection = await adapter.detect();
+  const response = await setMapping(
+    serverUrl(credential),
+    credential.token,
+    adapter.id,
+    enabled,
+    detection.version,
+  );
+  await setMapped(adapter.id, enabled);
+  await logEvent({ event: enabled ? "map" : "unmap", tool: adapter.id, outcome: "ok" });
+
+  out("");
+  out(`  ${adapter.displayName}: usage mapping ${enabled ? "ON" : "OFF"}`);
+  if (enabled) {
+    out(`  Metering:      ${response.meteringMethod}`);
+    out(`  Verification:  ${response.verificationCapability}`);
+    if (capabilities.availabilityNote) out(`  Note:          ${capabilities.availabilityNote}`);
+  }
+  out("");
 }
 
 // ---------------------------------------------------------- enable/disable
@@ -335,31 +408,71 @@ async function runTool(toolId: string, args: string[]): Promise<void> {
   SECURITY UPDATE  ${migration.detail}`);
 
   const credential = await requireCredential();
+  const detection = await adapter.detect();
+  const mapped = await isMapped(adapter.id);
+  const meterable = !adapter.capabilities().meteringMethods.includes("unsupported");
+
+  // Routing, when the tool speaks a protocol USAGE can carry and the account
+  // has a connection for it. Optional: a tool can be metered without being
+  // routed, and the user may have connected nothing.
   const config = await fetchConfig(serverUrl(credential), credential.token);
-  const route = chooseRoute(config, adapter);
-  if (!route) {
-    out(`No connected provider can carry ${adapter.displayName} yet.`);
-    process.exit(1);
+  const route = adapter.protocol === "none" ? null : chooseRoute(config, adapter);
+
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const extraArgs: string[] = [];
+  let plan: { command: string; env: Record<string, string> } = { command: adapter.id, env: {} };
+
+  if (route) {
+    // The adapter decides what the child needs. The credential exists only in
+    // this environment object and in the child's process environment; nothing
+    // is written to disk, and both die when the tool exits.
+    plan = adapter.launchPlan({ url: route.url, minerToken: credential.token, label: route.label });
+    Object.assign(env, plan.env);
+  } else {
+    plan = adapter.launchPlan({ url: "", minerToken: "", label: "" });
   }
 
-  // The adapter decides what the child needs. The credential exists only in
-  // this environment object and in the child's process environment; nothing is
-  // written to disk, and both die when the tool exits.
-  const plan = adapter.launchPlan({
-    url: route.url,
-    minerToken: credential.token,
-    label: route.label,
-  });
-  const env: NodeJS.ProcessEnv = { ...process.env, ...plan.env };
+  // Metering, when the user opted this tool in. The receiver gets its own
+  // per-session secret; the miner credential is nowhere in the tool's
+  // environment unless routing put it there for the provider header.
+  let session: Awaited<ReturnType<typeof startMeteringSession>> | null = null;
+  if (mapped && meterable) {
+    const key = await loadDeviceKey();
+    await registerDeviceKey(serverUrl(credential), credential.token, key.publicKey).catch(() => undefined);
+    session = await startMeteringSession({
+      adapter,
+      toolVersion: detection.version,
+      serverUrl: serverUrl(credential),
+      token: credential.token,
+      key,
+      onObservation: (o) => {
+        const tokens = (o.inputTokens ?? 0) + (o.outputTokens ?? 0);
+        out(`  [USAGE] tracked ${tokens.toLocaleString()} tokens${o.model ? ` · ${o.model}` : ""}${o.upstreamRequestId ? " · request id" : ""}`);
+      },
+    });
+    const telemetry = adapter.telemetryLaunch({
+      endpoint: session.receiver.endpoint,
+      sessionSecret: session.receiver.sessionSecret,
+    });
+    if (telemetry) {
+      Object.assign(env, telemetry.env);
+      extraArgs.push(...telemetry.args);
+    }
+  }
 
   out("");
-  out(`  Starting ${adapter.displayName} with USAGE (${route.label}).`);
-  out(`  Mining: ${route.eligibility}`);
-  if (route.note) out(`  ${route.note}`);
+  out(`  Starting ${adapter.displayName} with USAGE.`);
+  if (route) {
+    out(`  Routing:  ${route.label} — mining ${route.eligibility}`);
+    if (route.note) out(`  ${route.note}`);
+  } else {
+    out("  Routing:  none (no connected provider for this tool)");
+  }
+  out(`  Metering: ${session ? "on — usage is tracked from the tool's own telemetry" : mapped ? "unavailable for this tool" : "off — enable it with: usage map " + adapter.id}`);
   out("  Session only — no credential is written to disk.");
   out("");
 
-  const child = spawn(plan.command, args, { stdio: "inherit", env, shell: true });
+  const child = spawn(plan.command, [...extraArgs, ...args], { stdio: "inherit", env, shell: true });
 
   // Drop this process's own references once the child holds its copy. It does
   // not scrub the string from the heap -- V8 offers no such guarantee, and
@@ -367,7 +480,15 @@ async function runTool(toolId: string, args: string[]): Promise<void> {
   // for the lifetime of a session that may run for hours.
   for (const key of Object.keys(plan.env)) delete plan.env[key];
 
-  child.on("exit", (code) => process.exit(code ?? 0));
+  child.on("exit", async (code) => {
+    if (session) {
+      const summary = await session.end();
+      out("");
+      out(`  USAGE tracked ${summary.observed} request(s) this session` +
+        (summary.buffered ? ` · ${summary.buffered} waiting to sync` : "") + ".");
+    }
+    process.exit(code ?? 0);
+  });
 }
 
 // ------------------------------------------------------------------ main
@@ -381,6 +502,8 @@ function help(): void {
     usage enable <tool>        route a tool through USAGE  (--force to override)
     usage disable <tool>       put the tool's configuration back
     usage run <tool> [args]    start a tool with USAGE for this session only
+    usage map <tool>           allow USAGE to meter this tool (per-tool opt-in)
+    usage unmap <tool>         stop metering this tool
     usage sign-out             forget this device's credential
 
   Tools: ${ADAPTERS.map((adapter) => adapter.id).join(", ")}
@@ -417,6 +540,12 @@ export async function runCli(argv: string[]): Promise<void> {
         break;
       case "run":
         await runTool(args[0] ?? "", args.slice(1));
+        break;
+      case "map":
+        await map(args[0] ?? "", true);
+        break;
+      case "unmap":
+        await map(args[0] ?? "", false);
         break;
       case "sign-out":
         await clearCredential();

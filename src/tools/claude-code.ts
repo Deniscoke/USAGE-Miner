@@ -124,6 +124,57 @@ export const claudeCodeAdapter: LocalToolAdapter = {
 
   persistentConfig: "unsafe",
 
+  capabilities() {
+    return {
+      meteringMethods: ["native_otel", "routed"],
+      reads: ["model", "tokens", "cache", "request_id", "cost_estimate"],
+      // request_id is the Anthropic API request id: correlatable exactly with
+      // a USAGE route that carried the same request, and only then.
+      verificationCeiling: "provider_correlated",
+      availabilityNote: null,
+      experimental: false,
+    };
+  },
+
+  privacyProfile() {
+    return {
+      reads: ["Model", "Token counts (input, output, cache read, cache write)", "Request ID", "Cost estimate", "Timing"],
+      neverReads: ["Prompts", "Responses", "Tool arguments", "File paths", "Source code", "Your email or account id"],
+    };
+  },
+
+  /**
+   * Official telemetry -- code.claude.com/docs/en/monitoring-usage -- pointed
+   * at the local receiver for this session only.
+   *
+   * Logs exporter on, metrics off (metrics carry nothing per-request USAGE
+   * needs, and carry account attributes it does not want). OTLP over HTTP as
+   * JSON, which the receiver parses without a protobuf dependency.
+   *
+   * The three content switches are set to 0 explicitly, not left to default:
+   * a default is a thing that changes in a release note.
+   */
+  telemetryLaunch(receiver) {
+    return {
+      args: [],
+      env: {
+        CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+        OTEL_LOGS_EXPORTER: "otlp",
+        OTEL_METRICS_EXPORTER: "none",
+        OTEL_TRACES_EXPORTER: "none",
+        OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
+        OTEL_EXPORTER_OTLP_ENDPOINT: receiver.endpoint,
+        OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${receiver.sessionSecret}`,
+        OTEL_LOGS_EXPORT_INTERVAL: "2000",
+        OTEL_LOG_USER_PROMPTS: "0",
+        OTEL_LOG_TOOL_DETAILS: "0",
+        OTEL_LOG_TOOL_CONTENT: "0",
+        OTEL_LOG_RAW_API_BODIES: "0",
+        OTEL_LOG_ASSISTANT_RESPONSES: "0",
+      },
+    };
+  },
+
   /**
    * Routing for one session, in the child's environment only.
    *

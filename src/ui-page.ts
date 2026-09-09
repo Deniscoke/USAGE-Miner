@@ -80,6 +80,16 @@ export function renderApp(nonce: string): string {
   .links { margin-top: 20px; display: flex; gap: 16px; flex-wrap: wrap; }
   .links button { border: 0; background: none; padding: 0; color: var(--routed); font-size: 12px; }
   .empty { color: var(--muted); font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .cell { padding: 10px; border: 1px solid var(--border); border-radius: 5px; }
+  .cell-label { font-size: 11px; color: var(--muted); }
+  .cell-value { font-size: 18px; font-weight: 500; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .cell-hint { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .feed { margin-top: 10px; border-top: 1px solid var(--border); }
+  .actions { display: flex; align-items: center; gap: 12px; }
+  .switch { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+  .priv { padding: 8px 0; border-top: 1px solid var(--border); }
+  .priv:first-of-type { border-top: 0; }
 </style>
 </head>
 <body>
@@ -183,74 +193,140 @@ export function renderApp(nonce: string): string {
     }
     app.appendChild(prov);
 
+    // ------------------------------------------------------------ TODAY
+    // Three numbers that must never be one number. Tracked is what this
+    // machine saw; verified is what USAGE could corroborate; eligible is what
+    // the reward policy admitted. Each is a subset of the one before it.
+    var today = el("div", "card");
+    today.appendChild(el("h2", null, "Today"));
+    if (state.usage) {
+      var grid = el("div", "grid");
+      [
+        ["Tracked AI usage", fmtTokens(state.usage.trackedTokens) + " tokens", "what your tools reported"],
+        ["Verified AI usage", fmtTokens(state.usage.verifiedTokens) + " tokens", "confirmed by USAGE"],
+        ["Mining eligible", fmtMicros(state.usage.eligibleComputeMicros), "compute that can earn"],
+        ["Estimated USAGE", state.usage.estimatedPoints ? "+" + state.usage.estimatedPoints : "—", "until the epoch settles"]
+      ].forEach(function (cell) {
+        var c = el("div", "cell");
+        c.appendChild(el("div", "cell-label", cell[0]));
+        c.appendChild(el("div", "cell-value tnum", cell[1]));
+        c.appendChild(el("div", "cell-hint", cell[2]));
+        grid.appendChild(c);
+      });
+      today.appendChild(grid);
+      if (state.usage.recent && state.usage.recent.length) {
+        var feed = el("div", "feed");
+        state.usage.recent.slice(0, 6).forEach(function (r) {
+          var line = el("div", "row");
+          line.appendChild(el("span", "meta", toolName(state, r.tool) + " · " + fmtTokens(r.tokens) + " tokens"));
+          line.appendChild(el("span", "tag " + (r.status === "tracked" ? "off" : "on"),
+            r.status === "tracked" ? "TRACKED" : r.status === "routed" ? "ROUTED ✓" : "VERIFIED ✓"));
+          feed.appendChild(line);
+        });
+        today.appendChild(feed);
+      }
+    } else {
+      today.appendChild(el("div", "empty", "Figures appear once USAGE has seen usage from this device."));
+    }
+    app.appendChild(today);
+
+    // --------------------------------------------------------- AI TOOLS
     var tools = el("div", "card");
-    tools.appendChild(el("h2", null, "AI tools on this computer"));
+    tools.appendChild(el("h2", null, "AI apps found on this computer"));
     state.tools.forEach(function (t) {
       var row = el("div", "row");
       var left = el("div");
-      var title = el("div", "name", t.name + (t.experimental ? "  (experimental)" : ""));
-      left.appendChild(title);
-      left.appendChild(el("div", "meta",
-        !t.installed ? "Not installed"
-          : t.conflict ? t.conflict
-          : t.mining ? "Mining through USAGE"
-          : t.mode === "launch"
-            ? "Started by USAGE — nothing is written to disk"
-            : "Installed" + (t.version ? " · " + t.version : "")));
+      left.appendChild(el("div", "name", t.name + (t.experimental ? "  (experimental)" : "")));
+      var status;
+      if (!t.installed) status = "Not detected";
+      else if (!t.meterable) status = t.availabilityNote || "Cannot be metered here";
+      else if (t.mapped) status = "Usage mapping ON · verification up to: " + ceilingLabel(t.verificationCeiling);
+      else status = "Detected" + (t.version ? " · " + t.version : "") + " · mapping off";
+      left.appendChild(el("div", "meta", status));
+      if (t.conflict) left.appendChild(el("div", "meta", t.conflict));
       row.appendChild(left);
 
-      var right = el("div");
-      if (!t.installed) {
+      var right = el("div", "actions");
+      if (t.installed && t.meterable) {
+        var label = el("label", "switch");
+        var box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = t.mapped;
+        box.onchange = function () {
+          var enable = box.checked;
+          if (enable && !window.confirm(
+            "Allow USAGE to meter " + t.name + "?\n\nUSAGE reads: " + t.reads.join(", ") +
+            ".\nUSAGE never reads: " + t.neverReads.join(", ") + "."
+          )) { box.checked = false; return; }
+          act(function () {
+            return api("/mapping", { tool: t.id, enabled: enable }).then(function (r) {
+              if (r && r.error) window.alert(r.message || "Could not change mapping.");
+            });
+          });
+        };
+        label.appendChild(box);
+        label.appendChild(el("span", null, "Map usage"));
+        right.appendChild(label);
+
+        if (t.mode === "launch" || t.id === "codex") {
+          var start = el("button", "primary", "Start with USAGE");
+          start.onclick = function () {
+            act(function () {
+              return api("/launch", { tool: t.id }).then(function (r) {
+                if (r && r.error) window.alert(r.message || "Could not start it.");
+              });
+            });
+          };
+          right.appendChild(start);
+        }
+      } else if (!t.installed) {
         right.appendChild(el("span", "tag off", "—"));
-      } else if (t.mode === "launch") {
-        // No enable button at all for a tool USAGE starts itself. There is
-        // nothing to turn on: routing exists for the life of the session.
-        var start = el("button", "primary", "Start with USAGE");
-        start.onclick = function () {
-          act(function () {
-            return api("/launch", { tool: t.id }).then(function (r) {
-              if (r && r.error) window.alert(r.message || "Could not start it.");
-            });
-          });
-        };
-        right.appendChild(start);
-      } else if (t.mining) {
-        var off = el("button", null, "Turn off");
-        off.onclick = function () { act(function () { return api("/disable", { tool: t.id }); }); };
-        right.appendChild(off);
-      } else {
-        var on = el("button", "primary", t.conflict ? "Replace" : "Enable mining");
-        on.onclick = function () {
-          if (t.conflict && !window.confirm(
-            t.name + " already points at a custom endpoint.\\n\\n" + t.conflict +
-            "\\n\\nReplace it? Your current settings are backed up and restored when you turn mining off."
-          )) return;
-          act(function () {
-            return api("/enable", { tool: t.id, force: Boolean(t.conflict) }).then(function (r) {
-              if (r && r.error) window.alert(r.message || "Could not enable mining.");
-              else if (r && r.ok === false) window.alert(r.message);
-            });
-          });
-        };
-        right.appendChild(on);
       }
       row.appendChild(right);
       tools.appendChild(row);
     });
     tools.appendChild(el("div", "note",
-      "Tools USAGE starts get their routing in that session's environment — no credential is written to disk, and it is gone when the tool closes. Tools that are configured have their own config file edited, which can name the credential but never contains it; what was there is backed up, and turning mining off puts it back exactly."));
+      "Mapping is per app and opt-in. A mapped app is metered from its own official telemetry when USAGE starts it; " +
+      "nothing is written to the app's settings and nothing is read from your files. " +
+      "Tracked usage appears here and on your web account; only usage USAGE can verify itself can earn."));
     app.appendChild(tools);
+
+    // ------------------------------------------------------------ PRIVACY
+    var privacy = el("div", "card");
+    privacy.appendChild(el("h2", null, "Exactly what USAGE reads"));
+    state.tools.filter(function (t) { return t.installed && t.meterable; }).forEach(function (t) {
+      var block = el("div", "priv");
+      block.appendChild(el("div", "name", t.name));
+      block.appendChild(el("div", "meta", "Reads: " + (t.reads.length ? t.reads.join(" · ") : "nothing")));
+      block.appendChild(el("div", "meta", "Never reads: " + t.neverReads.join(" · ")));
+      privacy.appendChild(block);
+    });
+    privacy.appendChild(el("div", "note",
+      "USAGE measures compute metadata, not conversations. No prompt, response, file, command or line of code leaves this computer through USAGE Miner — the parser has no field to put one in."));
+    app.appendChild(privacy);
 
     appendFooter(state);
   }
 
-  function appendFooter(state) {
-    var privacy = el("div", "card");
-    privacy.appendChild(el("h2", null, "What USAGE records"));
-    privacy.appendChild(el("div", "note",
-      "Model, token counts, cost, latency and timing. Never your prompts, your responses, your tool arguments or your code."));
-    app.appendChild(privacy);
+  function fmtTokens(n) {
+    n = Number(n || 0);
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k";
+    return String(n);
+  }
+  function fmtMicros(m) {
+    m = Number(m || 0);
+    return "$" + (m / 1e6).toFixed(m >= 1e6 ? 2 : 4) + " equiv.";
+  }
+  function toolName(state, id) {
+    var t = state.tools.filter(function (x) { return x.id === id; })[0];
+    return t ? t.name : id;
+  }
+  function ceilingLabel(c) {
+    return c === "routed_confirmed" ? "routed" : c === "provider_correlated" ? "verified (when correlated)" : "tracked only";
+  }
 
+  function appendFooter(state) {
     var links = el("div", "links");
     if (state.signedIn) {
       var dash = el("button", null, "Open dashboard");

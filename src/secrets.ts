@@ -89,6 +89,35 @@ $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($protected, $nu
 [System.Text.Encoding]::UTF8.GetString($bytes)
 `.trim();
 
+/**
+ * DPAPI for any small secret, not only the credential.
+ *
+ * The device signing key and the offline telemetry buffer are held the same
+ * way: encrypted to this Windows account, unreadable elsewhere. One code path
+ * for all of them means one place to get right.
+ */
+export async function protectString(plaintext: string): Promise<string> {
+  if (platform() !== "win32") {
+    throw new SecretStorageError("unsupported_platform", "Secure storage is Windows-only in this beta.");
+  }
+  try {
+    return await powershell(PROTECT_SCRIPT, plaintext);
+  } catch {
+    throw new SecretStorageError("protect_failed", "Windows could not protect the value.");
+  }
+}
+
+export async function unprotectString(protectedValue: string): Promise<string> {
+  if (platform() !== "win32") {
+    throw new SecretStorageError("unsupported_platform", "Secure storage is Windows-only in this beta.");
+  }
+  try {
+    return await powershell(UNPROTECT_SCRIPT, protectedValue);
+  } catch {
+    throw new SecretStorageError("unprotect_failed", "Stored value could not be read on this account.");
+  }
+}
+
 export interface StoredCredential {
   token: string;
   deviceId: string;

@@ -7,6 +7,10 @@ import { logEvent } from "./log.js";
 import { clearCredential, loadCredential, saveCredential, type StoredCredential } from "./secrets.js";
 import { claudeCodeAdapter } from "./tools/claude-code.js";
 import { codexAdapter } from "./tools/codex.js";
+import { geminiCliAdapter } from "./tools/gemini-cli.js";
+import { cursorAdapter } from "./tools/cursor.js";
+import { isMapped, setMapped } from "./mappings.js";
+import { fetchDeviceUsage, setMapping, type DeviceUsageSummary } from "./api.js";
 import type { LocalToolAdapter } from "./tools/adapter.js";
 import { VERSION } from "./version.js";
 import { renderApp } from "./ui-page.js";
@@ -31,7 +35,7 @@ import { migrateInsecureConfig } from "./migrate.js";
  * nonce, and every state-changing route is POST with an origin check.
  */
 
-const ADAPTERS: LocalToolAdapter[] = [claudeCodeAdapter, codexAdapter];
+const ADAPTERS: LocalToolAdapter[] = [claudeCodeAdapter, geminiCliAdapter, codexAdapter, cursorAdapter];
 
 interface ToolView {
   id: string;
@@ -46,6 +50,13 @@ interface ToolView {
    * "configure" its own config file can name the credential without holding it
    */
   mode: "launch" | "configure";
+  /** The user opted this tool in to metering on this device. */
+  mapped: boolean;
+  meterable: boolean;
+  availabilityNote: string | null;
+  verificationCeiling: string;
+  reads: readonly string[];
+  neverReads: readonly string[];
 }
 
 export interface AppState {
@@ -61,6 +72,8 @@ export interface AppState {
   updateAvailable: boolean;
   /** Set once, after an older build's credential has been cleaned up. */
   securityNotice: string | null;
+  /** Today's figures, as the SERVER computed them. Null when signed out or offline. */
+  usage: DeviceUsageSummary | null;
 }
 
 async function readTools(): Promise<ToolView[]> {
@@ -86,6 +99,12 @@ async function readTools(): Promise<ToolView[]> {
       // Honest labelling: Codex has never been run live through USAGE.
       experimental: adapter.id === "codex",
       mode: adapter.persistentConfig === "unsafe" ? "launch" : "configure",
+      mapped: await isMapped(adapter.id),
+      meterable: !adapter.capabilities().meteringMethods.includes("unsupported"),
+      availabilityNote: adapter.capabilities().availabilityNote,
+      verificationCeiling: adapter.capabilities().verificationCeiling,
+      reads: adapter.privacyProfile().reads,
+      neverReads: adapter.privacyProfile().neverReads,
     });
   }
   return views;
@@ -100,6 +119,8 @@ async function readTools(): Promise<ToolView[]> {
 const CONFIG_TTL_MS = 30_000;
 const HEARTBEAT_INTERVAL_MS = 5 * 60_000;
 let configCache: { at: number; config: MinerConfig } | null = null;
+const USAGE_TTL_MS = 20_000;
+let usageCache: { at: number; value: DeviceUsageSummary | null } = { at: 0, value: null };
 let lastHeartbeatAt = 0;
 
 export function invalidateConfigCache(): void {
@@ -139,6 +160,7 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     error: null,
     updateAvailable: false,
     securityNotice,
+    usage: null,
   };
 
   let credential: StoredCredential | null = null;
@@ -176,9 +198,24 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     await sendHeartbeat(
       credential.serverUrl,
       credential.token,
-      state.tools.filter((tool) => tool.mining).map((tool) => tool.id),
+      state.tools.map((tool) => ({
+        tool: tool.id,
+        version: tool.version,
+        detected: tool.installed,
+        mapped: tool.mapped,
+      })),
+      `${platform()} ${release()}`,
+      VERSION,
     ).catch(() => undefined);
   }
+
+  if (Date.now() - usageCache.at > USAGE_TTL_MS) {
+    usageCache = {
+      at: Date.now(),
+      value: await fetchDeviceUsage(credential.serverUrl, credential.token).catch(() => null),
+    };
+  }
+  state.usage = usageCache.value;
 
   return state;
 }
@@ -427,6 +464,35 @@ export async function startDesktop(): Promise<DesktopHandle> {
 
         await logEvent({ event: "launch", tool: adapter.id, outcome: "ok" });
         json(response, { ok: true, label: route.label, note: route.note });
+        return;
+      }
+
+      /**
+       * Per-tool opt-in. The device records the choice and tells the server;
+       * the server answers with how it will meter the tool. Nothing about
+       * trust is decided here.
+       */
+      if (url.pathname === "/mapping" && request.method === "POST") {
+        const body = await readBody(request);
+        const adapter = ADAPTERS.find((entry) => entry.id === body.tool);
+        if (!adapter) return json(response, { error: "unknown_tool" }, 400);
+        if (adapter.capabilities().meteringMethods.includes("unsupported")) {
+          return json(response, { error: "not_meterable", message: adapter.capabilities().availabilityNote }, 400);
+        }
+        const enabled = body.enabled === true;
+
+        const credential = await loadCredential();
+        if (!credential) return json(response, { error: "not_signed_in" }, 401);
+
+        const detection = await adapter.detect();
+        try {
+          const result = await setMapping(credential.serverUrl, credential.token, adapter.id, enabled, detection.version);
+          await setMapped(adapter.id, enabled);
+          await logEvent({ event: enabled ? "map" : "unmap", tool: adapter.id, outcome: "ok" });
+          json(response, { ok: true, ...result });
+        } catch (error) {
+          json(response, { error: "server", message: (error as Error).message }, 502);
+        }
         return;
       }
 

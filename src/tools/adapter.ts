@@ -33,7 +33,46 @@
  *    around; it is the rule being enforced.
  */
 
-export type ToolId = "claude-code" | "codex";
+export type ToolId = "claude-code" | "codex" | "gemini-cli" | "cursor";
+
+/**
+ * How USAGE can meter a tool. Declared by the adapter, and the ONLY thing the
+ * adapter declares about trust. Verification level and economic eligibility
+ * are decided by the server from what it can itself corroborate.
+ */
+export type MeteringMethod =
+  | "native_otel"
+  | "routed"
+  | "provider_import"
+  | "local_observed"
+  | "unsupported";
+
+export interface ToolCapabilities {
+  meteringMethods: readonly MeteringMethod[];
+  /** Which observation fields the tool's telemetry actually supplies. */
+  reads: readonly ("model" | "tokens" | "cache" | "reasoning" | "request_id" | "cost_estimate")[];
+  /** Honest ceiling for the strongest evidence this tool can produce on its own. */
+  verificationCeiling: "local_observed" | "provider_correlated" | "routed_confirmed";
+  /** Shown to the user before they enable anything. */
+  availabilityNote: string | null;
+  experimental: boolean;
+}
+
+/**
+ * What the miner does and does not read from this tool. Data-driven, so the
+ * PRIVACY screen and the website render the same truth from the same source.
+ */
+export interface PrivacyProfile {
+  reads: readonly string[];
+  neverReads: readonly string[];
+}
+
+/** Environment and arguments that turn a tool's telemetry toward the receiver. */
+export interface TelemetryLaunch {
+  env: Record<string, string>;
+  /** Extra command-line arguments, for tools configured that way (Codex `-c`). */
+  args: readonly string[];
+}
 
 export interface ToolDetection {
   installed: boolean;
@@ -89,11 +128,20 @@ export interface LocalToolAdapter {
   readonly id: ToolId;
   readonly displayName: string;
   /** The wire format this tool speaks, so the core can pick a valid route. */
-  readonly protocol: "anthropic_compatible" | "openai_compatible";
+  readonly protocol: "anthropic_compatible" | "openai_compatible" | "none";
   /** Whether `enableMining` can work without putting a secret on disk. */
   readonly persistentConfig: PersistentConfigSupport;
   /** Session-scoped routing, for the launcher. Nothing is written anywhere. */
   launchPlan(route: RouteConfig): LaunchPlan;
+
+  capabilities(): ToolCapabilities;
+  privacyProfile(): PrivacyProfile;
+  /**
+   * Session-scoped telemetry configuration pointing at the local receiver.
+   * Null when the tool has no local telemetry surface. The session secret is
+   * per launch and never the miner credential.
+   */
+  telemetryLaunch(receiver: { endpoint: string; sessionSecret: string }): TelemetryLaunch | null;
 
   detect(): Promise<ToolDetection>;
   inspectRouting(): Promise<RoutingState>;

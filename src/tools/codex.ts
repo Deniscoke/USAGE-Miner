@@ -124,6 +124,48 @@ export const codexAdapter: LocalToolAdapter = {
    */
   persistentConfig: "safe",
 
+  capabilities() {
+    return {
+      meteringMethods: ["native_otel", "routed"],
+      // Documented in codex-rs/otel/src/events/session_telemetry.rs: token
+      // counts on codex.sse_event(response.completed); no model attribute, no
+      // response id. Counts without identity are analytics, and are labelled so.
+      reads: ["tokens", "cache", "reasoning"],
+      verificationCeiling: "local_observed",
+      availabilityNote:
+        "Codex telemetry reports token counts but neither the model nor a request id, so usage is tracked but cannot be verified. Routing through USAGE is the stronger option.",
+      experimental: true,
+    };
+  },
+
+  privacyProfile() {
+    return {
+      reads: ["Token counts (input, output, cached, cache write, reasoning, tool)", "Timing"],
+      neverReads: ["Prompts", "Responses", "Tool arguments and output", "File paths", "Source code"],
+    };
+  },
+
+  /**
+   * Codex is configured through `-c key=value` overrides, which live for one
+   * invocation -- the same session-scoped property the environment gives the
+   * other tools. `log_user_prompt` is set false explicitly; its default is not
+   * documented, and undocumented defaults are not privacy controls.
+   */
+  telemetryLaunch(receiver) {
+    return {
+      env: {},
+      args: [
+        "-c", 'otel.exporter="otlp-http"',
+        "-c", `otel.exporter.otlp-http.endpoint="${receiver.endpoint}/v1/logs"`,
+        "-c", 'otel.exporter.otlp-http.protocol="json"',
+        "-c", `otel.exporter.otlp-http.headers.Authorization="Bearer ${receiver.sessionSecret}"`,
+        "-c", "otel.log_user_prompt=false",
+        "-c", 'otel.metrics_exporter="none"',
+        "-c", 'otel.trace_exporter="none"',
+      ],
+    };
+  },
+
   launchPlan(route: RouteConfig) {
     return {
       command: "codex",

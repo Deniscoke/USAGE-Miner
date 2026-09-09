@@ -141,14 +141,109 @@ export function rotateCredential(
   return request(serverUrl, "/api/miner/credential/rotate", { method: "POST", token, body: "{}" });
 }
 
+/**
+ * Safe device state. Tool ids, versions and mapping flags -- never a process
+ * list, a path, a username or anything about the filesystem.
+ */
+export interface HeartbeatTool {
+  tool: string;
+  version: string | null;
+  detected: boolean;
+  mapped: boolean;
+}
+
 export function sendHeartbeat(
   serverUrl: string,
   token: string,
-  enabledTools: string[],
+  tools: HeartbeatTool[],
+  os: string,
+  minerVersion: string,
 ): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(serverUrl, "/api/miner/heartbeat", {
     method: "POST",
     token,
-    body: JSON.stringify({ enabledTools }),
+    body: JSON.stringify({
+      protocolVersion: "miner-protocol-v2",
+      minerVersion,
+      os,
+      tools,
+      // Kept for servers that predate v2. Display only either way.
+      enabledTools: tools.filter((t) => t.mapped).map((t) => t.tool),
+    }),
   });
+}
+
+export interface MappingResponse {
+  tool: string;
+  status: "enabled" | "disabled";
+  meteringMethod: string;
+  verificationCapability: string;
+}
+
+/** Ask the server to record a mapping. The server decides everything else. */
+export function setMapping(
+  serverUrl: string,
+  token: string,
+  tool: string,
+  enabled: boolean,
+  toolVersion: string | null,
+): Promise<MappingResponse> {
+  return request<MappingResponse>(serverUrl, "/api/miner/mappings", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ tool, enabled, toolVersion }),
+  });
+}
+
+/** Register (or re-register) this device's public signing key. Idempotent. */
+export function registerDeviceKey(
+  serverUrl: string,
+  token: string,
+  publicKey: string,
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(serverUrl, "/api/miner/device-key", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ algorithm: "ed25519", publicKey }),
+  });
+}
+
+export interface TelemetryUploadResult {
+  accepted: number;
+  duplicate: number;
+  rejected: number;
+  /** Per-observation verdicts, by localEventId. Never content. */
+  verdicts?: Record<string, "accepted" | "duplicate" | "rejected" | "matched">;
+}
+
+/**
+ * Upload signed, normalized observations.
+ *
+ * The body is exactly what `stripToSchema` produced plus a signature. There is
+ * no field for anything the server would trust on the device's say-so.
+ */
+export function uploadTelemetry(
+  serverUrl: string,
+  token: string,
+  observations: readonly { observation: unknown; signature: { version: string; value: string } }[],
+): Promise<TelemetryUploadResult> {
+  return request<TelemetryUploadResult>(serverUrl, "/api/miner/telemetry", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ schema: "local-usage-observation-v1", observations }),
+  });
+}
+
+/** Today's tracked / verified / eligible figures, as the server computes them. */
+export interface DeviceUsageSummary {
+  day: string;
+  trackedTokens: number;
+  verifiedTokens: number;
+  eligibleComputeMicros: number;
+  estimatedPoints: string | null;
+  recent: { tool: string; tokens: number; status: "tracked" | "verified" | "routed"; at: string }[];
+}
+
+export function fetchDeviceUsage(serverUrl: string, token: string): Promise<DeviceUsageSummary> {
+  return request<DeviceUsageSummary>(serverUrl, "/api/miner/usage", { token });
 }
