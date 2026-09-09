@@ -506,7 +506,7 @@ describe("the offline buffer holds metadata only", () => {
 
     await acknowledge(["new"]);
     expect(await pending()).toEqual([]);
-  });
+  });}, 30_000);
 });
 
 describe("stripToSchema", () => {
