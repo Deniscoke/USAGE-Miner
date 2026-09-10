@@ -17,6 +17,7 @@ import type { LocalToolAdapter } from "./tools/adapter.js";
 import { VERSION } from "./version.js";
 import { renderApp } from "./ui-page.js";
 import { migrateInsecureConfig } from "./migrate.js";
+import { chooseRoute, type ChosenRoute } from "./route.js";
 
 /**
  * The desktop window.
@@ -85,6 +86,12 @@ export interface AiRoute {
   label: string;
   rewardStatus: "eligible" | "held" | "ineligible" | "none";
   reason: string;
+  /** The wire format Claude Code will speak on this route ("Anthropic-compatible"). */
+  wire: string | null;
+  /** True when a connected provider carries Claude Code's own wire format. */
+  claudeCompatible: boolean;
+  /** How the launched session authenticates to USAGE, in words. No secrets. */
+  auth: string | null;
 }
 
 export interface AppState {
@@ -359,18 +366,24 @@ async function applyTrackingStatus(state: AppState, deviceId: string): Promise<v
   }
 }
 
-function describeRoute(config: MinerConfig, chosen: ReturnType<typeof chooseRoute>): AiRoute {
-  if (!chosen) return { kind: "none", label: "No route", rewardStatus: "none", reason: "No AI route is available for Claude Code." };
-  const provider = config.routes.find((r) => r.url === chosen.url);
-  if (provider) {
+function describeRoute(config: MinerConfig, chosen: ChosenRoute | null): AiRoute {
+  if (!chosen) {
+    return { kind: "none", label: "No route", rewardStatus: "none", reason: "No AI route is available for Claude Code.", wire: null, claudeCompatible: false, auth: null };
+  }
+  if (chosen.kind === "provider") {
     // The SERVER's economic verdict. `eligible_route` alone is route
     // capability (routable, measurable, priced), never a reward.
-    const verdict = provider.rewardStatus ?? "held";
+    const sessions = config.routeSessions?.available === true;
     return {
       kind: "provider",
-      label: provider.label,
-      rewardStatus: verdict === "unavailable" ? "none" : verdict,
-      reason: provider.miningLabel,
+      label: chosen.label,
+      rewardStatus: chosen.rewardStatus === "unavailable" ? "none" : chosen.rewardStatus,
+      reason: chosen.reason,
+      wire: chosen.surfaceLabel,
+      claudeCompatible: chosen.surface === "anthropic_compatible",
+      auth: sessions
+        ? "USAGE route session (short-lived, this route only) — your Claude login is not used"
+        : "your Claude login (route sessions unavailable on this server)",
     };
   }
   return {
@@ -378,6 +391,9 @@ function describeRoute(config: MinerConfig, chosen: ReturnType<typeof chooseRout
     label: chosen.label,
     rewardStatus: "held",
     reason: chosen.note ?? "USAGE-funded gateway credits are not reward eligible.",
+    wire: chosen.surfaceLabel,
+    claudeCompatible: false,
+    auth: "your Claude login, carried through USAGE's own gateway",
   };
 }
 
@@ -397,18 +413,6 @@ function whyNotEarning(state: AppState): string | null {
   return state.route.reason;
 }
 
-/** The route a tool should use, preferring one that actually earns. */
-function chooseRoute(config: MinerConfig, adapter: LocalToolAdapter) {
-  const tool = config.tools[adapter.id];
-  if (!tool) return null;
-  const earning = tool.routes.find((route) => route.miningEligibility === "eligible_route");
-  const chosen = earning ?? tool.routes[0];
-  if (chosen) return { url: chosen.url, label: chosen.label, note: undefined as string | undefined };
-  if (tool.fallback) {
-    return { url: tool.fallback.url, label: tool.fallback.label, note: tool.fallback.note };
-  }
-  return null;
-}
 
 export function openBrowser(url: string): void {
   // Tests and headless checks drive the local server directly; they should not
@@ -622,6 +626,9 @@ export async function startDesktop(): Promise<DesktopHandle> {
         const credential = await loadCredential();
         if (!credential) return json(response, { error: "not_signed_in" }, 401);
 
+        // Resolved FRESH for the click, never from the page's stale copy; the
+        // launcher resolves again immediately before the spawn.
+        invalidateConfigCache();
         const config = await currentConfig(credential);
         const route = chooseRoute(config, adapter);
         if (!route) {
@@ -631,6 +638,12 @@ export async function startDesktop(): Promise<DesktopHandle> {
             400,
           );
         }
+        await logEvent({
+          event: "launch_route",
+          tool: adapter.id,
+          outcome: "ok",
+          detail: `${route.label} · ${route.surfaceLabel} · ${route.kind} · reward ${route.rewardStatus}`,
+        });
 
         // Through the miner's own executable, so the child is started by the
         // same tested launcher the CLI uses rather than a second copy of it.
@@ -644,7 +657,14 @@ export async function startDesktop(): Promise<DesktopHandle> {
         ).unref();
 
         await logEvent({ event: "launch", tool: adapter.id, outcome: "ok" });
-        json(response, { ok: true, label: route.label, note: route.note });
+        json(response, {
+          ok: true,
+          label: route.label,
+          note: route.note,
+          rewardStatus: trackOnly ? "ineligible" : route.rewardStatus,
+          wire: route.surfaceLabel,
+          kind: route.kind,
+        });
         return;
       }
 

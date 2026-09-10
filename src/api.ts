@@ -92,6 +92,31 @@ export interface MinerRoute {
   /** The server's economic verdict for this route: eligible | held | ineligible | unavailable. */
   rewardStatus?: "eligible" | "held" | "ineligible" | "unavailable";
   miningLabel: string;
+  /**
+   * The wire surface of this entry (M16C0). One connection may appear once per
+   * surface -- OpenRouter answers both -- with the same connection id and the
+   * same verdict: one connection, one funding context, two wire formats.
+   */
+  surface?: "anthropic_compatible" | "openai_compatible";
+  surfaceLabel?: string;
+  /** Registry family ("openrouter"), for display and model defaults. */
+  providerFamily?: string;
+}
+
+/** A short-lived route credential from the server (M16C0 §10). Never a provider key. */
+export interface RouteSession {
+  token: string;
+  expiresAt: string;
+  ttlSeconds: number;
+  tool: string;
+  connectionId: string;
+  surface: "anthropic_compatible" | "openai_compatible";
+  wire: string;
+  url: string;
+  label: string;
+  providerFamily: string;
+  rewardStatus: "eligible" | "held" | "ineligible" | "unavailable";
+  miningLabel: string;
 }
 
 export interface MinerToolConfig {
@@ -119,6 +144,8 @@ export interface MinerConfig {
   mappings?: ServerMapping[];
   mining: { network: string; networkLabel?: string; scoringVersion: string };
   routes: MinerRoute[];
+  /** Whether the server can mint route sessions, and where. */
+  routeSessions?: { available: boolean; url: string; ttlSeconds: number };
   tools: Record<string, MinerToolConfig>;
   privacy: { recorded: string[]; neverRecorded: string[] };
 }
@@ -148,6 +175,24 @@ export function pollPairing(serverUrl: string, pollToken: string): Promise<Pairi
 
 export function fetchConfig(serverUrl: string, token: string): Promise<MinerConfig> {
   return request<MinerConfig>(serverUrl, "/api/miner/config", { token });
+}
+
+/**
+ * Ask USAGE for a route session: a credential bound to ONE tool, ONE of this
+ * account's connections and ONE wire surface, for a few hours. The device
+ * credential authenticates the request; the provider credential is never in
+ * the answer. The token goes only into the launched child's environment.
+ */
+export function createRouteSession(
+  serverUrl: string,
+  token: string,
+  input: { tool: string; connectionId: string; surface: "anthropic_compatible" | "openai_compatible" },
+): Promise<RouteSession> {
+  return request<RouteSession>(serverUrl, "/api/miner/route-session", {
+    method: "POST",
+    token,
+    body: JSON.stringify(input),
+  });
 }
 
 /**

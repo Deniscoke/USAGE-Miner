@@ -42,6 +42,15 @@ written to disk. This is how **Claude Code** works, and the only way it works �
 its settings file takes literal values and cannot name a credential held
 elsewhere, so configuring it persistently would mean leaving a token on disk.
 
+Since 0.4.5, "Start with USAGE" asks USAGE for a **route session** — a
+short-lived credential bound to one connection and one wire surface, never a
+provider key — and starts Claude Code in a USAGE profile
+(`%APPDATA%\USAGE\claude-profile`) that shares your plugins, skills, rules and
+project memory with `~/.claude` but holds no saved login. Your claude.ai login
+is not used, moved or changed; inside the session, `/status` shows the USAGE
+route and `Auth token: ANTHROPIC_AUTH_TOKEN`. Your OpenRouter connection is
+offered to Claude Code on OpenRouter's Anthropic-compatible surface.
+
 **Configured.** The tool's own config file is edited, and may only *name* a
 credential rather than contain one. **Codex** can do this
 (`env_key = "USAGE_MINER_TOKEN"`).

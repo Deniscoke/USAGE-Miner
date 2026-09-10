@@ -4,13 +4,16 @@ import { hostname, platform, release } from "node:os";
 import {
   DEFAULT_SERVER_URL,
   ApiError,
+  createRouteSession,
   fetchConfig,
   pollPairing,
   sendHeartbeat,
   startPairing,
-  type MinerConfig,
-  type MinerRoute,
+  type RouteSession,
 } from "./api.js";
+import { chooseRoute } from "./route.js";
+import { prepareUsageClaudeProfile } from "./tools/claude-profile.js";
+import type { RouteConfig } from "./tools/adapter.js";
 import { logEvent } from "./log.js";
 import { migrateInsecureConfig } from "./migrate.js";
 import {
@@ -72,32 +75,6 @@ async function requireCredential(): Promise<StoredCredential> {
   return credential;
 }
 
-/** Pick the route a tool should use, preferring one that actually earns. */
-function chooseRoute(config: MinerConfig, adapter: LocalToolAdapter): {
-  url: string;
-  label: string;
-  eligibility: string;
-  note?: string;
-} | null {
-  const tool = config.tools[adapter.id];
-  if (!tool) return null;
-
-  const routes: MinerRoute[] = tool.routes;
-  const earning = routes.find((route) => route.miningEligibility === "eligible_route");
-  const chosen = earning ?? routes[0];
-  if (chosen) {
-    return { url: chosen.url, label: chosen.label, eligibility: chosen.miningLabel };
-  }
-  if (tool.fallback) {
-    return {
-      url: tool.fallback.url,
-      label: tool.fallback.label,
-      eligibility: "Held",
-      note: tool.fallback.note,
-    };
-  }
-  return null;
-}
 
 // --------------------------------------------------------------- sign in
 
@@ -359,7 +336,7 @@ async function enable(toolId: string, force: boolean): Promise<void> {
   await logEvent({ event: "enable", tool: adapter.id, outcome: "ok" });
   out("");
   out(`  ${result.message}`);
-  out(`  Mining: ${route.eligibility}`);
+  out(`  Reward: ${route.rewardStatus.toUpperCase()} — ${route.reason}`);
   if (route.note) out(`  ${route.note}`);
   out("");
   out(`  Use ${adapter.displayName} normally. Nothing else to do.`);
@@ -420,18 +397,53 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
   // `--no-route`: meter only. Native telemetry does not need USAGE in the
   // request path, and a user may prefer their tool to talk to its provider
   // directly while still tracking usage. Routing stays the stronger proof.
+  // Resolved FRESH, here, immediately before the spawn: the window's copy of
+  // the configuration may be minutes old, and the route that is launched is
+  // the one the server names now.
   const config = await fetchConfig(serverUrl(credential), credential.token);
   const route = adapter.protocol === "none" || noRoute ? null : chooseRoute(config, adapter);
 
   const env: NodeJS.ProcessEnv = { ...process.env };
   const extraArgs: string[] = [];
   let plan: { command: string; env: Record<string, string> } = { command: adapter.id, env: {} };
+  let auth = "none";
 
   if (route) {
+    const base: RouteConfig = {
+      url: route.url,
+      minerToken: credential.token,
+      label: route.label,
+      providerFamily: route.providerFamily,
+      surface: route.surface,
+    };
+    let launch: RouteConfig = base;
+    auth = "your Claude login (route session unavailable) — USAGE still swaps in your provider's credential, but /status cannot show it";
+
+    // A route session (M16C0): only for a connected provider route, only when
+    // the server can mint one. The token lives in this object and the child's
+    // environment, and expires on its own.
+    if (adapter.id === "claude-code" && route.kind === "provider" && route.connectionId && config.routeSessions?.available) {
+      try {
+        const session: RouteSession = await createRouteSession(serverUrl(credential), credential.token, {
+          tool: adapter.id,
+          connectionId: route.connectionId,
+          surface: route.surface,
+        });
+        const profile = await prepareUsageClaudeProfile();
+        launch = { ...base, session: { token: session.token, expiresAt: session.expiresAt, profileDir: profile.dir } };
+        const expires = new Date(session.expiresAt);
+        auth = `USAGE route session · expires ${expires.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · your Claude login is not used or changed` +
+          (profile.unshared.length ? ` · not shared: ${profile.unshared.join(", ")}` : "");
+        if (profile.removedSavedLogin) auth += " · a login saved inside the USAGE profile was removed";
+      } catch (error) {
+        auth = `your Claude login (route session failed: ${(error as Error).message}) — /status cannot show the route as proven`;
+      }
+    }
+
     // The adapter decides what the child needs. The credential exists only in
     // this environment object and in the child's process environment; nothing
     // is written to disk, and both die when the tool exits.
-    plan = adapter.launchPlan({ url: route.url, minerToken: credential.token, label: route.label });
+    plan = adapter.launchPlan(launch);
     Object.assign(env, plan.env);
   } else {
     plan = adapter.launchPlan({ url: "", minerToken: "", label: "" });
@@ -469,8 +481,15 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
   out("");
   out(`  Starting ${adapter.displayName} with USAGE.`);
   if (route) {
-    out(`  Routing:  ${route.label} — mining ${route.eligibility}`);
-    if (route.note) out(`  ${route.note}`);
+    // Exactly what this launch will do, resolved seconds ago. No secrets.
+    out(`  Selected route:  ${route.label}${route.kind === "provider" ? " — your connected provider" : " — USAGE gateway (fallback)"}`);
+    out(`  Reward:          ${route.rewardStatus.toUpperCase()} — ${route.reason}`);
+    out(`  Wire protocol:   ${route.surfaceLabel}`);
+    out(`  Auth:            ${auth}`);
+    if (plan.env.ANTHROPIC_AUTH_TOKEN) {
+      out("  Verify in Claude Code with /status: 'Anthropic base URL' must be the route above,");
+      out("  and the credential line must read 'Auth token: ANTHROPIC_AUTH_TOKEN' — not a claude.ai account.");
+    }
   } else {
     out("  Routing:  none (no connected provider for this tool)");
   }

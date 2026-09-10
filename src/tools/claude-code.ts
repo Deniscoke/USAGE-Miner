@@ -49,6 +49,19 @@ import {
 
 const HEADER_NAME = "x-usage-miner-token";
 
+/**
+ * OpenRouter model slugs for Claude Code's model aliases. Bare Claude ids are
+ * not accepted on OpenRouter's Anthropic surface; these are the priced ids in
+ * USAGE's `usage-pricing-v3`. Non-secret.
+ */
+export const OPENROUTER_MODEL_ENV: Readonly<Record<string, string>> = Object.freeze({
+  ANTHROPIC_MODEL: "anthropic/claude-sonnet-4.6",
+  ANTHROPIC_DEFAULT_OPUS_MODEL: "anthropic/claude-opus-5",
+  ANTHROPIC_DEFAULT_SONNET_MODEL: "anthropic/claude-sonnet-4.6",
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: "anthropic/claude-haiku-4.5",
+  CLAUDE_CODE_SUBAGENT_MODEL: "anthropic/claude-sonnet-4.6",
+});
+
 interface ClaudeBackup {
   existed: boolean;
   settings: ClaudeSettings;
@@ -173,12 +186,37 @@ export const claudeCodeAdapter: LocalToolAdapter = {
   /**
    * Routing for one session, in the child's environment only.
    *
-   * ANTHROPIC_API_KEY is set empty on purpose: Claude Code checks it first, and
-   * an empty value means "use the credential you are already signed in with",
-   * which keeps a Claude subscription working. ANTHROPIC_AUTH_TOKEN is never
-   * set -- it would replace the user's own Authorization header.
+   * WITH A ROUTE SESSION (the M16C0 path): Claude Code is started in the USAGE
+   * profile (see claude-profile.ts) with the session token as its gateway
+   * credential. Measured on 2.1.268: a saved claude.ai login keeps its own
+   * OAuth token in Authorization even when ANTHROPIC_AUTH_TOKEN is set, so the
+   * only way the route session is presented -- and the only way `/status`
+   * can show "Auth token: ANTHROPIC_AUTH_TOKEN" -- is a config directory with
+   * no saved login. The user's real login in ~/.claude is never touched.
+   *
+   * For an OpenRouter route the model aliases are OpenRouter slugs, because
+   * OpenRouter's Anthropic surface requires them (docs, 2026-09-11) and they
+   * are the ids USAGE's pricing snapshot names.
+   *
+   * WITHOUT ONE (server too old, or route sessions unavailable): the header-
+   * only launch. Claude Code then authenticates to USAGE with the device
+   * credential in its own header and keeps its claude.ai login in
+   * Authorization; USAGE strips that and uses the server-held provider
+   * credential, but `/status` cannot show the route as proven. The miner says
+   * which of the two it is doing before launching.
    */
   launchPlan(route: RouteConfig) {
+    if (route.session) {
+      const env: Record<string, string> = {
+        CLAUDE_CONFIG_DIR: route.session.profileDir,
+        ANTHROPIC_BASE_URL: route.url,
+        ANTHROPIC_AUTH_TOKEN: route.session.token,
+        // Explicitly empty, so a key in the parent environment cannot win.
+        ANTHROPIC_API_KEY: "",
+      };
+      if (route.providerFamily === "openrouter") Object.assign(env, OPENROUTER_MODEL_ENV);
+      return { command: "claude", env };
+    }
     return {
       command: "claude",
       env: {

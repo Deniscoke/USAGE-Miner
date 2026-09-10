@@ -311,7 +311,12 @@ export function renderApp(nonce: string): string {
       var rRow = el("div", "row");
       var rLeft = el("div");
       rLeft.appendChild(el("div", "name", state.route.label + (state.route.kind === "usage_gateway" ? " (fallback)" : "")));
-      rLeft.appendChild(el("div", "meta", (state.route.kind === "provider" ? "Your connected provider" : "No provider connected — USAGE's own gateway carries the traffic") + " · verified routing"));
+      // Two different states, never blurred: a connected provider that carries
+      // Claude Code's own wire format, or USAGE's held fallback.
+      rLeft.appendChild(el("div", "meta", (state.route.kind === "provider"
+        ? "Your connected provider" + (state.route.claudeCompatible ? " · Claude Code compatible" : "")
+        : "No eligible provider connected — USAGE's own gateway carries the traffic") + " · verified routing"));
+      if (state.route.wire) rLeft.appendChild(el("div", "meta", "Wire: " + state.route.wire + (state.route.auth ? " · Auth: " + state.route.auth : "")));
       rLeft.appendChild(el("div", "meta", "Reward: " + state.route.rewardStatus.toUpperCase() + " — " + state.route.reason));
       rRow.appendChild(rLeft);
       rRow.appendChild(el("span", "tag " + (state.route.rewardStatus === "eligible" ? "on" : "warn"), state.route.rewardStatus.toUpperCase()));
@@ -352,6 +357,9 @@ export function renderApp(nonce: string): string {
           left.appendChild(el("div", ok ? "meta" : "err", "Last sync         " + (tr.lastSyncAt ? fmtTime(tr.lastSyncAt) + " · " : "") + (tr.lastSyncLabel || tr.lastSyncOutcome) + (tr.buffered ? " · " + tr.buffered + " waiting" : "")));
         }
         left.appendChild(el("div", "meta", "Verification      " + ceilingLabel(t.verificationCeiling)));
+        if (t.mode === "launch" && state.route && state.route.kind !== "none") {
+          left.appendChild(el("div", "meta", "Route             " + state.route.label + (state.route.kind === "usage_gateway" ? " (fallback)" : "") + (state.route.wire ? " · " + state.route.wire : "")));
+        }
         left.appendChild(el("div", "meta", "Reward            " + (t.reward ? t.reward.status.toUpperCase() + (t.reward.reason ? " — " + t.reward.reason : "") : "—")));
       }
       if (t.conflict) left.appendChild(el("div", "meta", t.conflict));
@@ -382,11 +390,17 @@ export function renderApp(nonce: string): string {
 
         if (t.mode === "launch" || t.id === "codex") {
           var start = el("button", "primary", "Start with USAGE");
-          start.title = "Starts the app routed through the AI route above, with usage tracking.";
+          start.title = "Resolves the route freshly from USAGE, then starts the app routed through it, with usage tracking.";
           start.onclick = function () {
             act(function () {
               return api("/launch", { tool: t.id }).then(function (r) {
-                if (r && r.error) window.alert(r.message || "Could not start it.");
+                if (r && r.error) { window.alert(r.message || "Could not start it."); return; }
+                if (r && r.label) {
+                  // What the click resolved, from the server, seconds ago.
+                  var was = start.textContent;
+                  start.textContent = "Starting: " + r.label + " · " + String(r.rewardStatus || "").toUpperCase() + (r.wire ? " · " + r.wire : "");
+                  setTimeout(function () { start.textContent = was; }, 6000);
+                }
               });
             });
           };

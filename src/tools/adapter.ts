@@ -101,6 +101,17 @@ export interface RouteConfig {
   minerToken: string;
   /** Shown to the user so they know which connection they are mining through. */
   label: string;
+  /** Registry family of the connection ("openrouter"), when routed to one. */
+  providerFamily?: string | null;
+  /** The wire surface the tool speaks on this route. */
+  surface?: "anthropic_compatible" | "openai_compatible";
+  /**
+   * A route session (M16C0): a short-lived USAGE credential bound to this
+   * route, plus the isolated Claude profile it is launched in. When present,
+   * the tool authenticates to USAGE with it instead of carrying the device
+   * credential in a custom header, and the user's own login is not used.
+   */
+  session?: { token: string; expiresAt: string; profileDir: string };
 }
 
 export interface EnableResult {
