@@ -97,12 +97,24 @@ export interface MinerToolConfig {
   fallback: { label: string; url: string; miningEligibility: string; note: string } | null;
 }
 
+export interface ServerMapping {
+  tool: string;
+  status: "enabled" | "disabled";
+  lastEventAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface MinerConfig {
   protocolVersion: string;
   minimumMinerVersion: string;
   updateRequired: boolean;
-  account: { label: string };
-  mining: { network: string; scoringVersion: string };
+  /** `display` is a safe account identity (masked email); `label` is the credential's name. */
+  account: { label: string; display?: string };
+  /** The device row this credential belongs to. The window must describe THIS id. */
+  device?: { id: string; name: string };
+  /** The server's mapping state for this device: the authoritative one. */
+  mappings?: ServerMapping[];
+  mining: { network: string; networkLabel?: string; scoringVersion: string };
   routes: MinerRoute[];
   tools: Record<string, MinerToolConfig>;
   privacy: { recorded: string[]; neverRecorded: string[] };
@@ -110,7 +122,7 @@ export interface MinerConfig {
 
 export function startPairing(
   serverUrl: string,
-  device: { deviceName: string; platform: string; appVersion: string },
+  device: { deviceName: string; platform: string; appVersion: string; installationId?: string },
 ): Promise<PairingStartResponse> {
   return request<PairingStartResponse>(serverUrl, "/api/miner/pair", {
     method: "POST",
@@ -221,7 +233,9 @@ export interface TelemetryUploadResult {
   duplicate: number;
   rejected: number;
   /** Per-observation verdicts, by localEventId. Never content. */
-  verdicts?: Record<string, "accepted" | "duplicate" | "rejected" | "matched">;
+  verdicts?: Record<string, "accepted" | "duplicate" | "rejected" | "matched" | "conflict">;
+  /** Reasons by localEventId for rejected items: the server's own words, never content. */
+  reasons?: Record<string, string>;
 }
 
 /**

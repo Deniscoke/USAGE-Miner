@@ -238,14 +238,14 @@ async function status(): Promise<void> {
   await sendHeartbeat(
     serverUrl(credential),
     credential.token,
-    await heartbeatTools(),
+    await heartbeatTools(credential.deviceId),
     `${osPlatform()} ${osRelease()}`,
     VERSION,
   ).catch(() => undefined);
 }
 
 /** Safe device state for the heartbeat: ids, versions, flags. Nothing else. */
-async function heartbeatTools() {
+async function heartbeatTools(deviceId: string) {
   const tools = [];
   for (const adapter of ADAPTERS) {
     const detection = await adapter.detect();
@@ -253,7 +253,7 @@ async function heartbeatTools() {
       tool: adapter.id,
       version: detection.version,
       detected: detection.installed,
-      mapped: await isMapped(adapter.id),
+      mapped: await isMapped(deviceId, adapter.id),
     });
   }
   return tools;
@@ -291,7 +291,7 @@ async function map(toolId: string, enabled: boolean): Promise<void> {
     enabled,
     detection.version,
   );
-  await setMapped(adapter.id, enabled);
+  await setMapped(credential.deviceId, adapter.id, enabled);
   await logEvent({ event: enabled ? "map" : "unmap", tool: adapter.id, outcome: "ok" });
 
   out("");
@@ -411,7 +411,7 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
 
   const credential = await requireCredential();
   const detection = await adapter.detect();
-  const mapped = await isMapped(adapter.id);
+  const mapped = await isMapped(credential.deviceId, adapter.id);
   const meterable = !adapter.capabilities().meteringMethods.includes("unsupported");
 
   // Routing, when the tool speaks a protocol USAGE can carry and the account
@@ -450,6 +450,7 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
       serverUrl: serverUrl(credential),
       token: credential.token,
       key,
+      deviceId: credential.deviceId,
       onObservation: (o) => {
         const tokens = (o.inputTokens ?? 0) + (o.outputTokens ?? 0);
         out(`  [USAGE] tracked ${tokens.toLocaleString()} tokens${o.model ? ` · ${o.model}` : ""}${o.upstreamRequestId ? " · request id" : ""}`);

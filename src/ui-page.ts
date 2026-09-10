@@ -168,8 +168,7 @@ export function renderApp(nonce: string): string {
 
     var head = el("div");
     head.appendChild(el("h1", null, "USAGE Miner"));
-    head.appendChild(el("div", "sub", "Version " + state.version +
-      (state.deviceName ? " · " + state.deviceName : "")));
+    head.appendChild(el("div", "sub", "Version " + state.version));
     app.appendChild(head);
 
     if (state.pairing) {
@@ -198,58 +197,51 @@ export function renderApp(nonce: string): string {
       return;
     }
 
+    // ------------------------------------------------------------ WHO / WHERE
+    // The account is a person; this PC is a device. Two lines, never one.
     var acct = el("div", "card");
     acct.appendChild(el("h2", null, "Account"));
     var acctRow = el("div", "row");
-    acctRow.appendChild(el("div", "name", state.accountLabel || "Signed in"));
-    acctRow.appendChild(el("span", "meta", state.network || ""));
+    acctRow.appendChild(el("div", "name", state.accountDisplay || "USAGE account"));
+    acctRow.appendChild(el("span", "tag " + (state.offline ? "off" : "on"), state.offline ? "OFFLINE" : "CONNECTED ✓"));
     acct.appendChild(acctRow);
+    var devRow = el("div", "row");
+    var devLeft = el("div");
+    devLeft.appendChild(el("div", "name", "This PC · " + (state.deviceName || "this device")));
+    devLeft.appendChild(el("div", "meta", "Connected to your USAGE account" + (state.networkLabel ? " · " + state.networkLabel : "")));
+    devRow.appendChild(devLeft);
+    devRow.appendChild(el("span", "tag " + (state.offline ? "off" : "on"), state.offline ? "OFFLINE" : "ONLINE ✓"));
+    acct.appendChild(devRow);
     if (state.offline) {
-      acct.appendChild(el("div", "err", "Offline — unable to reach USAGE. Local detection still works; usage uploads resume when the connection returns."));
+      acct.appendChild(el("div", "err", "Offline — unable to reach USAGE. Mapping status unavailable; local detection still works and usage is kept locally until the connection returns."));
       var again = el("button", "primary", "Retry");
       again.style.marginTop = "8px";
       again.onclick = function () { refresh(); };
       acct.appendChild(again);
     } else if (state.error) acct.appendChild(el("div", "err", state.error));
-    if (state.updateAvailable) {
-      acct.appendChild(el("div", "note", "A newer USAGE Miner is available."));
-    }
-    if (state.securityNotice) {
-      acct.appendChild(el("div", "note", "Security update: " + state.securityNotice));
-    }
+    if (state.updateAvailable) acct.appendChild(el("div", "note", "A newer USAGE Miner is available."));
+    if (state.securityNotice) acct.appendChild(el("div", "note", "Security update: " + state.securityNotice));
     app.appendChild(acct);
 
-    var prov = el("div", "card");
-    prov.appendChild(el("h2", null, "Providers"));
-    if (!state.providers.length) {
-      prov.appendChild(el("div", "empty", "No AI provider connected yet."));
-      var connect = el("button", "primary", "Connect a provider");
-      connect.style.marginTop = "12px";
-      connect.onclick = function () { act(function () { return api("/open", { target: "providers" }); }); };
-      prov.appendChild(connect);
-    } else {
-      state.providers.forEach(function (p) {
-        var row = el("div", "row");
-        row.appendChild(el("div", "name", p.label));
-        row.appendChild(el("span", "meta", p.miningLabel));
-        prov.appendChild(row);
-      });
-    }
-    app.appendChild(prov);
-
     // ------------------------------------------------------------ TODAY
-    // Three numbers that must never be one number. Tracked is what this
-    // machine saw; verified is what USAGE could corroborate; eligible is what
-    // the reward policy admitted. Each is a subset of the one before it.
+    // Four numbers that are never one number: tracked (this PC reported it),
+    // verified (USAGE corroborated it), eligible (policy admitted it), USAGE
+    // (what it is estimated to earn). And the reason when the last is zero.
+    var anyTracking = state.tools.some(function (t) { return t.mapped && t.tracking && t.tracking.active; });
+    var anyMapped = state.tools.some(function (t) { return t.mapped; });
     var today = el("div", "card");
-    today.appendChild(el("h2", null, "Today"));
+    var todayHead = el("div", "row");
+    todayHead.appendChild(el("h2", null, "Today on this PC"));
+    todayHead.appendChild(el("span", "tag " + (anyTracking ? "on" : anyMapped ? "warn" : "off"),
+      anyTracking ? "TRACKING ACTIVE" : anyMapped ? "MAPPED · IDLE" : "NOT MAPPED"));
+    today.appendChild(todayHead);
     if (state.usage) {
       var grid = el("div", "grid");
       [
-        ["Tracked AI usage", fmtTokens(state.usage.trackedTokens) + " tokens", "what your tools reported"],
-        ["Verified AI usage", fmtTokens(state.usage.verifiedTokens) + " tokens", "confirmed by USAGE"],
-        ["Mining eligible", fmtMicros(state.usage.eligibleComputeMicros), "compute that can earn"],
-        ["Estimated USAGE", state.usage.estimatedPoints ? "+" + state.usage.estimatedPoints : "—", "until the epoch settles"]
+        ["Tracked", fmtTokens(state.usage.trackedTokens) + " tokens", "this PC reported"],
+        ["Verified", fmtTokens(state.usage.verifiedTokens) + " tokens", "confirmed by USAGE"],
+        ["Eligible", fmtMicros(state.usage.eligibleComputeMicros), "allowed to earn"],
+        ["USAGE", state.usage.estimatedPoints ? "+" + state.usage.estimatedPoints : "—", "until the epoch settles"]
       ].forEach(function (cell) {
         var c = el("div", "cell");
         c.appendChild(el("div", "cell-label", cell[0]));
@@ -262,32 +254,79 @@ export function renderApp(nonce: string): string {
         var feed = el("div", "feed");
         state.usage.recent.slice(0, 6).forEach(function (r) {
           var line = el("div", "row");
-          line.appendChild(el("span", "meta", toolName(state, r.tool) + " · " + fmtTokens(r.tokens) + " tokens"));
+          line.appendChild(el("span", "meta", toolName(state, r.tool) + " · " + fmtTokens(r.tokens) + " tokens · " + fmtTime(r.at)));
           line.appendChild(el("span", "tag " + (r.status === "tracked" ? "off" : "on"),
             r.status === "tracked" ? "TRACKED" : r.status === "routed" ? "ROUTED ✓" : "VERIFIED ✓"));
           feed.appendChild(line);
         });
         today.appendChild(feed);
       }
+    } else if (state.offline) {
+      today.appendChild(el("div", "empty", "Today's figures need USAGE. They appear when the connection returns."));
     } else {
-      today.appendChild(el("div", "empty", "Figures appear once USAGE has seen usage from this device."));
+      today.appendChild(el("div", "empty", "Figures appear once USAGE has seen usage from this PC."));
+    }
+    if (state.whyNotEarning) {
+      var why = el("div", "note");
+      why.appendChild(el("strong", null, "Why no USAGE? "));
+      why.appendChild(document.createTextNode(state.whyNotEarning));
+      today.appendChild(why);
     }
     app.appendChild(today);
 
-    // --------------------------------------------------------- AI TOOLS
+    // ------------------------------------------------------------ AI ROUTE
+    // What actually carries Claude Code's requests when started from here.
+    // A fallback is named as a fallback; "nothing connected" and "traffic
+    // goes through USAGE's gateway" are shown together, because both are true.
+    var routeCard = el("div", "card");
+    routeCard.appendChild(el("h2", null, "AI route"));
+    if (state.route && state.route.kind !== "none") {
+      var rRow = el("div", "row");
+      var rLeft = el("div");
+      rLeft.appendChild(el("div", "name", state.route.label + (state.route.kind === "usage_gateway" ? " (fallback)" : "")));
+      rLeft.appendChild(el("div", "meta", (state.route.kind === "provider" ? "Your connected provider" : "No provider connected — USAGE's own gateway carries the traffic") + " · verified routing"));
+      rLeft.appendChild(el("div", "meta", "Reward: " + state.route.rewardStatus.toUpperCase() + " — " + state.route.reason));
+      rRow.appendChild(rLeft);
+      rRow.appendChild(el("span", "tag " + (state.route.rewardStatus === "eligible" ? "on" : "warn"), state.route.rewardStatus.toUpperCase()));
+      routeCard.appendChild(rRow);
+    } else {
+      routeCard.appendChild(el("div", "empty", "No AI route available."));
+    }
+    if (!state.route || state.route.kind !== "provider") {
+      var connect = el("button", "primary", "Connect your provider");
+      connect.style.marginTop = "10px";
+      connect.onclick = function () { act(function () { return api("/open", { target: "providers" }); }); };
+      routeCard.appendChild(connect);
+    }
+    app.appendChild(routeCard);
+
+    // --------------------------------------------------------- AI APPS
     var tools = el("div", "card");
-    tools.appendChild(el("h2", null, "AI apps found on this computer"));
+    tools.appendChild(el("h2", null, "AI apps on this PC"));
     state.tools.forEach(function (t) {
       var row = el("div", "row");
       var left = el("div");
-      left.appendChild(el("div", "name", t.name + (t.experimental ? "  (experimental)" : "")));
-      var status;
-      if (t.detectionUnavailable) status = "Detection unavailable";
-      else if (!t.installed) status = "Not detected";
-      else if (!t.meterable) status = t.availabilityNote || "Cannot be metered here";
-      else if (t.mapped) status = "Usage mapping ON · verification up to: " + ceilingLabel(t.verificationCeiling);
-      else status = "Detected" + (t.version ? " · " + t.version : "") + " · mapping off";
-      left.appendChild(el("div", "meta", status));
+      left.appendChild(el("div", "name", t.name + (t.experimental ? "  (experimental)" : "") + (t.version ? "  " + t.version : "")));
+      if (t.detectionUnavailable) {
+        left.appendChild(el("div", "meta", "Detection unavailable"));
+      } else if (!t.installed) {
+        left.appendChild(el("div", "meta", "Not detected"));
+      } else if (!t.meterable) {
+        left.appendChild(el("div", "meta", t.availabilityNote || "Cannot be metered here"));
+      } else {
+        // Four separate facts, four separate lines.
+        var mappingWord = state.offline ? "status unavailable (offline)" : t.mappingStatus === "on" ? "ON" : t.mappingStatus === "off" ? "OFF" : "unknown";
+        left.appendChild(el("div", "meta", "USAGE mapping     " + mappingWord));
+        var tr = t.tracking || {};
+        var trackingWord = tr.active ? "ACTIVE" : tr.lastEventAt ? "idle · last event " + fmtTime(tr.lastEventAt) : t.mappingStatus === "on" ? "idle — start the app from here to track" : "off";
+        left.appendChild(el("div", "meta", "Tracking          " + trackingWord));
+        if (tr.lastSyncOutcome) {
+          var ok = tr.lastSyncOutcome === "accepted" || tr.lastSyncOutcome === "duplicate";
+          left.appendChild(el("div", ok ? "meta" : "err", "Last sync         " + (tr.lastSyncAt ? fmtTime(tr.lastSyncAt) + " · " : "") + (tr.lastSyncLabel || tr.lastSyncOutcome) + (tr.buffered ? " · " + tr.buffered + " waiting" : "")));
+        }
+        left.appendChild(el("div", "meta", "Verification      " + ceilingLabel(t.verificationCeiling)));
+        left.appendChild(el("div", "meta", "Reward            " + (t.reward ? t.reward.status.toUpperCase() + (t.reward.reason ? " — " + t.reward.reason : "") : "—")));
+      }
       if (t.conflict) left.appendChild(el("div", "meta", t.conflict));
       row.appendChild(left);
 
@@ -296,7 +335,8 @@ export function renderApp(nonce: string): string {
         var label = el("label", "switch");
         var box = document.createElement("input");
         box.type = "checkbox";
-        box.checked = t.mapped;
+        box.checked = t.mappingStatus === "on";
+        box.disabled = !!state.offline;
         box.onchange = function () {
           var enable = box.checked;
           if (enable && !window.confirm(
@@ -315,6 +355,7 @@ export function renderApp(nonce: string): string {
 
         if (t.mode === "launch" || t.id === "codex") {
           var start = el("button", "primary", "Start with USAGE");
+          start.title = "Starts the app routed through the AI route above, with usage tracking.";
           start.onclick = function () {
             act(function () {
               return api("/launch", { tool: t.id }).then(function (r) {
@@ -323,6 +364,18 @@ export function renderApp(nonce: string): string {
             });
           };
           right.appendChild(start);
+          if (t.mappingStatus === "on") {
+            var trackOnly = el("button", null, "Track only");
+            trackOnly.title = "Starts the app with its own sign-in and provider; USAGE only tracks usage.";
+            trackOnly.onclick = function () {
+              act(function () {
+                return api("/launch", { tool: t.id, route: false }).then(function (r) {
+                  if (r && r.error) window.alert(r.message || "Could not start it.");
+                });
+              });
+            };
+            right.appendChild(trackOnly);
+          }
         }
       } else if (!t.installed) {
         right.appendChild(el("span", "tag off", "—"));
@@ -331,9 +384,9 @@ export function renderApp(nonce: string): string {
       tools.appendChild(row);
     });
     tools.appendChild(el("div", "note",
-      "Mapping is per app and opt-in. A mapped app is metered from its own official telemetry when USAGE starts it; " +
-      "nothing is written to the app's settings and nothing is read from your files. " +
-      "Tracked usage appears here and on your web account; only usage USAGE can verify itself can earn."));
+      "Mapping is per app and opt-in, and USAGE's record of it is what you see here. A mapped app is tracked from its own official telemetry when started from this window. " +
+      "\\"Start with USAGE\\" also routes its requests through the AI route above (stronger proof); \\"Track only\\" keeps the app on its own account. " +
+      "Nothing is written to the app's settings and nothing is read from your files."));
     app.appendChild(tools);
 
     // ------------------------------------------------------------ PRIVACY
@@ -358,6 +411,13 @@ export function renderApp(nonce: string): string {
     if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
     if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k";
     return String(n);
+  }
+  function fmtTime(iso) {
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return "";
+      return d.getHours() + ":" + (d.getMinutes() < 10 ? "0" : "") + d.getMinutes();
+    } catch (e) { return ""; }
   }
   function fmtMicros(m) {
     m = Number(m || 0);
@@ -388,6 +448,9 @@ export function renderApp(nonce: string): string {
         act(function () { return api("/sign-out", {}); });
       };
       links.appendChild(so);
+    }
+    if (state.signedIn) {
+      app.appendChild(el("div", "meta", "Diagnostics: device " + (state.deviceId || "—") + " · network " + (state.network || "—") + " · protocol " + state.version));
     }
     var quit = el("button", null, "Quit");
     quit.onclick = function () {

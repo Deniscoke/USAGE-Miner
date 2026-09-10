@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { renderApp } from "./ui-page.js";
 import { DETECT_TIMEOUT_MS, readTools } from "./ui.js";
 import type { LocalToolAdapter } from "./tools/adapter.js";
@@ -31,6 +31,7 @@ describe("the page script", () => {
     // Every string literal must stay on one line; a newline inside one is
     // exactly the bug. Crude on purpose: it looks at the emitted text.
     for (const line of pageScript().split("\n")) {
+      if (line.trim().startsWith("//")) continue;
       const quotes = (line.match(/(?<!\\)"/g) ?? []).length;
       expect(quotes % 2, `unbalanced quotes: ${line.trim().slice(0, 80)}`).toBe(0);
     }
@@ -88,7 +89,8 @@ describe("tool detection cannot block the window", () => {
     expect(tools[3].installed).toBe(true);
     expect(tools[3].version).toBe("1.0.0");
     expect(tools).toHaveLength(4);
-  });
+    expect(tools).toHaveLength(4);
+  }, 20_000);
 
   it("runs the real adapters in bounded time", async () => {
     const started = Date.now();

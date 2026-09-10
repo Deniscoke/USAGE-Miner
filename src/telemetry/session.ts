@@ -6,6 +6,7 @@ import { MAPPINGS } from "./mappings.js";
 import { normalizeRecords, type LocalUsageObservation } from "./observation.js";
 import { startTelemetryReceiver, type TelemetryReceiver } from "./receiver.js";
 import { createUploader } from "./uploader.js";
+import { syncOutcomeFrom, updateTelemetryStatus } from "./status.js";
 
 /**
  * One metered tool session, start to finish.
@@ -35,6 +36,8 @@ export async function startMeteringSession(input: {
   serverUrl: string;
   token: string;
   key: DeviceKey;
+  /** The paired device this session reports for. Status is filed under it. */
+  deviceId?: string;
   onObservation?: (observation: LocalUsageObservation) => void;
 }): Promise<MeteringSession> {
   const mapping = MAPPINGS[input.adapter.id];
@@ -47,20 +50,35 @@ export async function startMeteringSession(input: {
   let uploaded = 0;
   let buffered = 0;
   let inFlight: Promise<void> = Promise.resolve();
+  const deviceId = input.deviceId ?? "unknown";
+  const tool = input.adapter.id;
+  // Status is best-effort and never throws into the session.
+  const status = (change: Parameters<typeof updateTelemetryStatus>[2]) =>
+    updateTelemetryStatus(deviceId, tool, change).catch(() => undefined);
 
   const receiver = await startTelemetryReceiver((records) => {
     const fresh = normalizeRecords(records, mapping, { toolVersion: input.toolVersion, localSessionId });
     if (fresh.length === 0) return;
     observations.push(...fresh);
     for (const observation of fresh) input.onObservation?.(observation);
+    void status({ lastEventAt: new Date().toISOString(), eventsThisSession: observations.length });
 
     // Serialised so batches never race the buffer file.
     inFlight = inFlight.then(async () => {
       const outcome = await uploader.push(fresh);
       uploaded += outcome.uploaded;
       buffered = outcome.buffered;
+      // The window shows this. A rejected upload is a failure the user can
+      // act on, not a line in a log nobody reads.
+      await status({
+        lastSyncAt: new Date().toISOString(),
+        lastSyncOutcome: syncOutcomeFrom({ result: outcome.result, errorCode: outcome.errorCode ?? null, errorStatus: outcome.errorStatus ?? null }),
+        buffered: outcome.buffered,
+      });
     });
   });
+
+  await status({ active: true, pid: process.pid, sessionStartedAt: new Date().toISOString(), eventsThisSession: 0 });
 
   await logEvent({ event: "metering_start", tool: input.adapter.id, outcome: "ok" });
 
@@ -75,6 +93,14 @@ export async function startMeteringSession(input: {
       uploaded += flushed.uploaded;
       buffered = flushed.buffered;
       await receiver.close();
+      await status({
+        active: false,
+        pid: null,
+        buffered,
+        ...(flushed.result || flushed.errorCode
+          ? { lastSyncAt: new Date().toISOString(), lastSyncOutcome: syncOutcomeFrom({ result: flushed.result, errorCode: flushed.errorCode ?? null, errorStatus: flushed.errorStatus ?? null }) }
+          : {}),
+      });
       await logEvent({
         event: "metering_end",
         tool: input.adapter.id,

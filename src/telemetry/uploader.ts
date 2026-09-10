@@ -51,6 +51,9 @@ export function signObservations(
 }
 
 export interface UploadOutcome {
+  /** Transport/API error code when the attempt failed, e.g. "unreachable", "revoked". */
+  errorCode?: string | null;
+  errorStatus?: number | null;
   uploaded: number;
   buffered: number;
   result: TelemetryUploadResult | null;
@@ -97,12 +100,14 @@ export function createUploader(input: {
       const step = BACKOFF_STEPS[Math.min(failures, BACKOFF_STEPS.length) - 1];
       notBefore = now() + step * 1000;
       const buffered = await enqueue(observations, now());
+      const code = (error as { code?: string }).code ?? null;
+      const status = (error as { status?: number }).status ?? null;
       await logEvent({
         event: "telemetry_upload",
         outcome: "unreachable",
-        detail: `buffered=${buffered} retry_in=${step}s reason=${(error as Error).name}`,
+        detail: `buffered=${buffered} retry_in=${step}s reason=${code ?? (error as Error).name}`,
       });
-      return { uploaded: 0, buffered, result: null };
+      return { uploaded: 0, buffered, result: null, errorCode: code, errorStatus: status };
     }
   }
 

@@ -9,7 +9,9 @@ import { claudeCodeAdapter } from "./tools/claude-code.js";
 import { codexAdapter } from "./tools/codex.js";
 import { geminiCliAdapter } from "./tools/gemini-cli.js";
 import { cursorAdapter } from "./tools/cursor.js";
-import { isMapped, setMapped } from "./mappings.js";
+import { reconcileMappings, setMapped } from "./mappings.js";
+import { installationId } from "./installation.js";
+import { isSessionAlive, loadTelemetryStatus, SYNC_COPY, type ToolTelemetryStatus } from "./telemetry/status.js";
 import { fetchDeviceUsage, setMapping, type DeviceUsageSummary } from "./api.js";
 import type { LocalToolAdapter } from "./tools/adapter.js";
 import { VERSION } from "./version.js";
@@ -50,8 +52,24 @@ interface ToolView {
    * "configure" its own config file can name the credential without holding it
    */
   mode: "launch" | "configure";
-  /** The user opted this tool in to metering on this device. */
+  /**
+   * The SERVER's mapping for this device and tool. "unknown" when USAGE could
+   * not be reached: the window never shows a local memory as if it were the
+   * server's word.
+   */
   mapped: boolean;
+  mappingStatus: "on" | "off" | "unknown";
+  /** What metering is doing right now, from the session's status file. */
+  tracking: {
+    active: boolean;
+    lastEventAt: string | null;
+    lastSyncAt: string | null;
+    lastSyncOutcome: string | null;
+    lastSyncLabel: string | null;
+    buffered: number;
+  };
+  /** Reward status for usage from this tool on the current route, in words. */
+  reward: { status: "eligible" | "held" | "ineligible" | "none"; reason: string };
   meterable: boolean;
   availabilityNote: string | null;
   verificationCeiling: string;
@@ -61,12 +79,29 @@ interface ToolView {
   detectionUnavailable: boolean;
 }
 
+export interface AiRoute {
+  /** "provider": the user's own connection; "usage_gateway": USAGE's fallback; "none": nothing. */
+  kind: "provider" | "usage_gateway" | "none";
+  label: string;
+  rewardStatus: "eligible" | "held" | "ineligible" | "none";
+  reason: string;
+}
+
 export interface AppState {
   version: string;
   signedIn: boolean;
   deviceName: string | null;
+  /** The paired device row this window describes. Must match the website. */
+  deviceId: string | null;
+  /** Safe account identity (masked email). Never the device name. */
+  accountDisplay: string | null;
   accountLabel: string | null;
   network: string | null;
+  networkLabel: string | null;
+  /** The path Claude Code traffic actually takes when started from here. */
+  route: AiRoute | null;
+  /** One sentence answering "why am I not earning?", or null when earning. */
+  whyNotEarning: string | null;
   providers: { label: string; miningLabel: string }[];
   tools: ToolView[];
   pairing: { userCode: string; verificationUrl: string } | null;
@@ -81,7 +116,9 @@ export interface AppState {
 }
 
 /** How long one adapter may take to say whether its tool is installed. */
-export const DETECT_TIMEOUT_MS = 3_000;
+// Generous for a cold start on a slow disk (three shells spawn in parallel);
+// a timed-out tool is retried on the next poll, not marked forever.
+export const DETECT_TIMEOUT_MS = 6_000;
 
 function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -119,6 +156,9 @@ async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
     experimental: adapter.id === "codex",
     mode: adapter.persistentConfig === "unsafe" ? "launch" : "configure",
     mapped: false,
+    mappingStatus: "unknown",
+    tracking: { active: false, lastEventAt: null, lastSyncAt: null, lastSyncOutcome: null, lastSyncLabel: null, buffered: 0 },
+    reward: { status: "none", reason: "" },
     meterable: !capabilities.meteringMethods.includes("unsupported"),
     availabilityNote: capabilities.availabilityNote,
     verificationCeiling: capabilities.verificationCeiling,
@@ -132,7 +172,6 @@ async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
     const routing = detection.installed
       ? await withTimeout(adapter.inspectRouting(), DETECT_TIMEOUT_MS, `${adapter.id} routing`)
       : ({ state: "off" } as const);
-    const mapped = await isMapped(adapter.id).catch(() => false);
     return {
       ...base,
       installed: detection.installed,
@@ -144,7 +183,6 @@ async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
           : routing.state === "unreadable"
             ? routing.reason
             : null,
-      mapped,
     };
   } catch (error) {
     await logEvent({ event: "detect", outcome: "error", detail: `${adapter.id}: ${(error as Error).message}` }).catch(() => undefined);
@@ -195,8 +233,13 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     version: VERSION,
     signedIn: false,
     deviceName: null,
+    deviceId: null,
+    accountDisplay: null,
     accountLabel: null,
     network: null,
+    networkLabel: null,
+    route: null,
+    whyNotEarning: null,
     providers: [],
     tools: [],
     pairing,
@@ -222,6 +265,8 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
 
   state.signedIn = true;
   state.deviceName = credential.deviceName;
+  state.deviceId = credential.deviceId;
+  await applyTrackingStatus(state, credential.deviceId);
 
   let config: MinerConfig;
   try {
@@ -236,7 +281,34 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
   }
 
   state.accountLabel = config.account.label;
+  state.accountDisplay = config.account.display ?? null;
   state.network = config.mining.network;
+  state.networkLabel = config.mining.networkLabel ?? config.mining.network;
+  // The server names the device this credential belongs to. If it differs
+  // from what the credential file says, the server wins -- and says so.
+  if (config.device?.id && config.device.id !== credential.deviceId) {
+    state.error = "This credential belongs to a different device record than expected. Sign out and in again.";
+  }
+  const deviceId = config.device?.id ?? credential.deviceId;
+  state.deviceId = deviceId;
+
+  // MAPPING IS THE SERVER'S. Reconcile the local memory to it, then display it.
+  const serverMappings = config.mappings ?? [];
+  await reconcileMappings(deviceId, serverMappings).catch(() => undefined);
+  const enabledOnServer = new Set(serverMappings.filter((m) => m.status === "enabled").map((m) => m.tool));
+  for (const tool of state.tools) {
+    tool.mapped = enabledOnServer.has(tool.id);
+    tool.mappingStatus = tool.mapped ? "on" : "off";
+  }
+
+  // The route Claude Code would take from here, and what that means for
+  // reward. "No provider connected" and "traffic goes through USAGE's own
+  // gateway" are both true at once; the window says both.
+  const claude = ADAPTERS.find((a) => a.id === "claude-code");
+  const chosen = claude ? chooseRoute(config, claude) : null;
+  state.route = describeRoute(config, chosen);
+  for (const tool of state.tools) tool.reward = rewardFor(tool, state.route);
+  state.whyNotEarning = whyNotEarning(state);
   state.providers = config.routes.map((route) => ({
     label: route.label,
     miningLabel: route.miningLabel,
@@ -268,6 +340,59 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
   state.usage = usageCache.value;
 
   return state;
+}
+
+/** Fill the per-tool tracking status from the sessions' status file. */
+async function applyTrackingStatus(state: AppState, deviceId: string): Promise<void> {
+  const statuses = await loadTelemetryStatus().catch(() => [] as ToolTelemetryStatus[]);
+  for (const tool of state.tools) {
+    const s = statuses.find((entry) => entry.deviceId === deviceId && entry.tool === tool.id);
+    if (!s) continue;
+    tool.tracking = {
+      active: isSessionAlive(s),
+      lastEventAt: s.lastEventAt,
+      lastSyncAt: s.lastSyncAt,
+      lastSyncOutcome: s.lastSyncOutcome,
+      lastSyncLabel: s.lastSyncOutcome ? SYNC_COPY[s.lastSyncOutcome] : null,
+      buffered: s.buffered,
+    };
+  }
+}
+
+function describeRoute(config: MinerConfig, chosen: ReturnType<typeof chooseRoute>): AiRoute {
+  if (!chosen) return { kind: "none", label: "No route", rewardStatus: "none", reason: "No AI route is available for Claude Code." };
+  const provider = config.routes.find((r) => r.url === chosen.url);
+  if (provider) {
+    const eligible = provider.miningEligibility === "eligible_route";
+    return {
+      kind: "provider",
+      label: provider.label,
+      rewardStatus: eligible ? "eligible" : "held",
+      reason: eligible ? "Your own connected provider carries the traffic." : provider.miningLabel,
+    };
+  }
+  return {
+    kind: "usage_gateway",
+    label: chosen.label,
+    rewardStatus: "held",
+    reason: chosen.note ?? "USAGE-funded gateway credits are not reward eligible.",
+  };
+}
+
+function rewardFor(tool: ToolView, route: AiRoute | null): ToolView["reward"] {
+  if (!tool.meterable) return { status: "none", reason: "Not metered here." };
+  if (tool.verificationCeiling === "local_observed" || tool.verificationCeiling === "device_attested") {
+    return { status: "ineligible", reason: "Local telemetry alone is tracked, never rewarded." };
+  }
+  if (!route || route.kind === "none") return { status: "held", reason: "No eligible paid AI route is connected." };
+  return { status: route.rewardStatus, reason: route.reason };
+}
+
+function whyNotEarning(state: AppState): string | null {
+  if (state.route?.rewardStatus === "eligible") return null;
+  if (!state.route || state.route.kind === "none") return "No eligible paid AI route is connected.";
+  if (state.route.kind === "usage_gateway") return "Claude Code runs through USAGE's own gateway, whose credits are not reward eligible. Connect your own provider to earn.";
+  return state.route.reason;
 }
 
 /** The route a tool should use, preferring one that actually earns. */
@@ -308,6 +433,7 @@ async function runPairing(onUpdate: (pairing: AppState["pairing"]) => void): Pro
     deviceName: hostname(),
     platform: `${platform()} ${release()}`,
     appVersion: VERSION,
+    installationId: await installationId().catch(() => undefined),
   });
 
   onUpdate({ userCode: started.userCode, verificationUrl: started.verificationUrl });
@@ -506,9 +632,12 @@ export async function startDesktop(): Promise<DesktopHandle> {
 
         // Through the miner's own executable, so the child is started by the
         // same tested launcher the CLI uses rather than a second copy of it.
+        // `route: false` is MAPPING MODE: the tool keeps its own provider and
+        // sign-in, and USAGE adds telemetry only.
+        const trackOnly = body.route === false;
         spawn(
           "cmd",
-          ["/c", "start", `${adapter.displayName} — USAGE Mining`, process.execPath, "run", adapter.id],
+          ["/c", "start", `${adapter.displayName} — USAGE${trackOnly ? " Tracking" : " Mining"}`, process.execPath, "run", adapter.id, ...(trackOnly ? ["--no-route"] : [])],
           { detached: true, stdio: "ignore" },
         ).unref();
 
@@ -537,7 +666,9 @@ export async function startDesktop(): Promise<DesktopHandle> {
         const detection = await adapter.detect();
         try {
           const result = await setMapping(credential.serverUrl, credential.token, adapter.id, enabled, detection.version);
-          await setMapped(adapter.id, enabled);
+          await setMapped(credential.deviceId, adapter.id, enabled);
+          // The server changed; the next /state must read it, not a cache.
+          invalidateConfigCache();
           await logEvent({ event: enabled ? "map" : "unmap", tool: adapter.id, outcome: "ok" });
           json(response, { ok: true, ...result });
         } catch (error) {
