@@ -57,6 +57,8 @@ interface ToolView {
   verificationCeiling: string;
   reads: readonly string[];
   neverReads: readonly string[];
+  /** Detection threw or timed out. The tool is shown, not the whole window hidden. */
+  detectionUnavailable: boolean;
 }
 
 export interface AppState {
@@ -69,6 +71,8 @@ export interface AppState {
   tools: ToolView[];
   pairing: { userCode: string; verificationUrl: string } | null;
   error: string | null;
+  /** True when USAGE could not be reached; local detection is still shown. */
+  offline: boolean;
   updateAvailable: boolean;
   /** Set once, after an older build's credential has been cleaned up. */
   securityNotice: string | null;
@@ -76,19 +80,63 @@ export interface AppState {
   usage: DeviceUsageSummary | null;
 }
 
-async function readTools(): Promise<ToolView[]> {
-  const views: ToolView[] = [];
-  for (const adapter of ADAPTERS) {
-    const detection = await adapter.detect();
-    const routing = detection.installed
-      ? await adapter.inspectRouting()
-      : ({ state: "off" } as const);
+/** How long one adapter may take to say whether its tool is installed. */
+export const DETECT_TIMEOUT_MS = 3_000;
 
-    views.push({
-      id: adapter.id,
-      name: adapter.displayName,
+function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} timed out`)), ms);
+    work.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+/**
+ * One tool per adapter, every adapter isolated.
+ *
+ * Detection runs in parallel and each adapter is bounded: a shell that hangs,
+ * an adapter that throws, or one that returns nonsense yields a row saying
+ * "Detection unavailable" for THAT tool, and the window renders anyway. The
+ * first-run bug this guards against was a page that never got past
+ * "Loading…"; nothing on this path may ever wait forever again.
+ */
+export async function readTools(adapters: readonly LocalToolAdapter[] = ADAPTERS): Promise<ToolView[]> {
+  return Promise.all(adapters.map((adapter) => readTool(adapter)));
+}
+
+async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
+  const capabilities = adapter.capabilities();
+  const privacy = adapter.privacyProfile();
+  const base: ToolView = {
+    id: adapter.id,
+    name: adapter.displayName,
+    installed: false,
+    version: null,
+    mining: false,
+    conflict: null,
+    experimental: adapter.id === "codex",
+    mode: adapter.persistentConfig === "unsafe" ? "launch" : "configure",
+    mapped: false,
+    meterable: !capabilities.meteringMethods.includes("unsupported"),
+    availabilityNote: capabilities.availabilityNote,
+    verificationCeiling: capabilities.verificationCeiling,
+    reads: privacy.reads,
+    neverReads: privacy.neverReads,
+    detectionUnavailable: false,
+  };
+  try {
+    const detection = await withTimeout(adapter.detect(), DETECT_TIMEOUT_MS, `${adapter.id} detection`);
+    if (typeof detection?.installed !== "boolean") throw new Error(`${adapter.id} detection returned nonsense`);
+    const routing = detection.installed
+      ? await withTimeout(adapter.inspectRouting(), DETECT_TIMEOUT_MS, `${adapter.id} routing`)
+      : ({ state: "off" } as const);
+    const mapped = await isMapped(adapter.id).catch(() => false);
+    return {
+      ...base,
       installed: detection.installed,
-      version: detection.version,
+      version: typeof detection.version === "string" ? detection.version : null,
       mining: routing.state === "usage",
       conflict:
         routing.state === "foreign"
@@ -96,19 +144,14 @@ async function readTools(): Promise<ToolView[]> {
           : routing.state === "unreadable"
             ? routing.reason
             : null,
-      // Honest labelling: Codex has never been run live through USAGE.
-      experimental: adapter.id === "codex",
-      mode: adapter.persistentConfig === "unsafe" ? "launch" : "configure",
-      mapped: await isMapped(adapter.id),
-      meterable: !adapter.capabilities().meteringMethods.includes("unsupported"),
-      availabilityNote: adapter.capabilities().availabilityNote,
-      verificationCeiling: adapter.capabilities().verificationCeiling,
-      reads: adapter.privacyProfile().reads,
-      neverReads: adapter.privacyProfile().neverReads,
-    });
+      mapped,
+    };
+  } catch (error) {
+    await logEvent({ event: "detect", outcome: "error", detail: `${adapter.id}: ${(error as Error).message}` }).catch(() => undefined);
+    return { ...base, detectionUnavailable: true };
   }
-  return views;
 }
+
 
 /**
  * The window polls every few seconds so an approval in the browser lands here
@@ -155,9 +198,10 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     accountLabel: null,
     network: null,
     providers: [],
-    tools: await readTools(),
+    tools: [],
     pairing,
     error: null,
+    offline: false,
     updateAvailable: false,
     securityNotice,
     usage: null,
@@ -165,7 +209,11 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
 
   let credential: StoredCredential | null = null;
   try {
-    credential = await loadCredential();
+    // Detection and the DPAPI read are independent; run them together so the
+    // first render does not pay for both in sequence.
+    const [tools, loaded] = await Promise.all([readTools(), loadCredential()]);
+    state.tools = tools;
+    credential = loaded;
   } catch (error) {
     state.error = (error as Error).message;
     return state;
@@ -180,8 +228,10 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     config = await currentConfig(credential);
   } catch (error) {
     // A revoked device and an offline machine look different to a user, and
-    // the message already distinguishes them.
+    // the message already distinguishes them. Either way the window renders:
+    // local detection is local, and does not need USAGE to answer.
     state.error = (error as Error).message;
+    state.offline = (error as { status?: number }).status === 0;
     return state;
   }
 

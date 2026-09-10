@@ -22,6 +22,8 @@ export class ApiError extends Error {
   }
 }
 
+export const REQUEST_TIMEOUT_MS = 8_000;
+
 async function request<T>(
   serverUrl: string,
   path: string,
@@ -36,7 +38,13 @@ async function request<T>(
 
   let response: Response;
   try {
-    response = await fetch(new URL(path, serverUrl), { ...rest, headers });
+    // Every call to USAGE is bounded. A request that never answers must not
+    // become a window that never renders.
+    response = await fetch(new URL(path, serverUrl), {
+      ...rest,
+      headers,
+      signal: rest.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
   } catch {
     throw new ApiError(0, "unreachable", "Could not reach USAGE. Check your connection.");
   }

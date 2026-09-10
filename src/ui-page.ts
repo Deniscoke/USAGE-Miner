@@ -101,12 +101,50 @@ export function renderApp(nonce: string): string {
   var app = document.getElementById("app");
   var busy = false;
 
+  // Every request is bounded, and a non-JSON answer is an error rather than
+  // a hang: the window must never wait on the local process forever.
+  var REQUEST_TIMEOUT_MS = 20000;
   function api(path, body) {
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = controller ? setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS) : null;
     return fetch(path + "?k=" + K, {
       method: body === undefined ? "GET" : "POST",
       headers: { "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body)
-    }).then(function (r) { return r.json(); });
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller ? controller.signal : undefined
+    }).then(function (r) {
+      return r.text().then(function (text) {
+        try { return JSON.parse(text); } catch (e) { throw new Error("bad_json"); }
+      });
+    }).finally(function () { if (timer) clearTimeout(timer); });
+  }
+
+  // What the user sees instead of "Loading…" when startup fails. The
+  // category is a word, never a message that could carry a path, a token or
+  // a header; the log in %APPDATA%\\USAGE has the detail.
+  var rendered = false;
+  function renderFailure(category) {
+    app.textContent = "";
+    var head = el("div");
+    head.appendChild(el("h1", null, "USAGE Miner"));
+    app.appendChild(head);
+    var card = el("div", "card");
+    card.appendChild(el("h2", null, "Something went wrong while starting."));
+    card.appendChild(el("div", "note",
+      "USAGE Miner is running, but this window could not load its state. Retry, or close this tab and open USAGE Miner again."));
+    var retry = el("button", "primary", "Retry");
+    retry.style.marginTop = "12px";
+    retry.onclick = function () { app.textContent = ""; app.appendChild(el("p", "empty", "Loading…")); refresh(); };
+    card.appendChild(retry);
+    card.appendChild(el("div", "meta", "Technical details: " + category));
+    app.appendChild(card);
+  }
+  function categorize(error) {
+    var m = error && error.message ? String(error.message) : "";
+    if (error && error.name === "AbortError") return "timeout";
+    if (m === "bad_json") return "bad_response";
+    if (/fetch|network|Failed/i.test(m)) return "unreachable";
+    return "render";
   }
 
   // Everything shown comes from the local process, but it is still built with
@@ -166,7 +204,13 @@ export function renderApp(nonce: string): string {
     acctRow.appendChild(el("div", "name", state.accountLabel || "Signed in"));
     acctRow.appendChild(el("span", "meta", state.network || ""));
     acct.appendChild(acctRow);
-    if (state.error) acct.appendChild(el("div", "err", state.error));
+    if (state.offline) {
+      acct.appendChild(el("div", "err", "Offline — unable to reach USAGE. Local detection still works; usage uploads resume when the connection returns."));
+      var again = el("button", "primary", "Retry");
+      again.style.marginTop = "8px";
+      again.onclick = function () { refresh(); };
+      acct.appendChild(again);
+    } else if (state.error) acct.appendChild(el("div", "err", state.error));
     if (state.updateAvailable) {
       acct.appendChild(el("div", "note", "A newer USAGE Miner is available."));
     }
@@ -238,7 +282,8 @@ export function renderApp(nonce: string): string {
       var left = el("div");
       left.appendChild(el("div", "name", t.name + (t.experimental ? "  (experimental)" : "")));
       var status;
-      if (!t.installed) status = "Not detected";
+      if (t.detectionUnavailable) status = "Detection unavailable";
+      else if (!t.installed) status = "Not detected";
       else if (!t.meterable) status = t.availabilityNote || "Cannot be metered here";
       else if (t.mapped) status = "Usage mapping ON · verification up to: " + ceilingLabel(t.verificationCeiling);
       else status = "Detected" + (t.version ? " · " + t.version : "") + " · mapping off";
@@ -255,8 +300,8 @@ export function renderApp(nonce: string): string {
         box.onchange = function () {
           var enable = box.checked;
           if (enable && !window.confirm(
-            "Allow USAGE to meter " + t.name + "?\n\nUSAGE reads: " + t.reads.join(", ") +
-            ".\nUSAGE never reads: " + t.neverReads.join(", ") + "."
+            "Allow USAGE to meter " + t.name + "?\\n\\nUSAGE reads: " + t.reads.join(", ") +
+            ".\\nUSAGE never reads: " + t.neverReads.join(", ") + "."
           )) { box.checked = false; return; }
           act(function () {
             return api("/mapping", { tool: t.id, enabled: enable }).then(function (r) {
@@ -354,13 +399,26 @@ export function renderApp(nonce: string): string {
   }
 
   function refresh() {
-    return api("/state").then(render).catch(function () {
-      app.textContent = "";
-      app.appendChild(el("p", "err", "USAGE Miner is no longer running. You can close this tab."));
+    return api("/state").then(function (state) {
+      if (!state || typeof state !== "object" || !Array.isArray(state.tools)) throw new Error("bad_json");
+      render(state);
+      rendered = true;
+    }).catch(function (error) {
+      if (rendered && categorize(error) === "unreachable") {
+        app.textContent = "";
+        app.appendChild(el("p", "err", "USAGE Miner is no longer running. You can close this tab."));
+        return;
+      }
+      renderFailure(categorize(error));
     });
   }
 
-  refresh();
+  // Startup timeout: if nothing has rendered by now, something is wrong and
+  // the user is told so. There is no state in which "Loading…" stays forever.
+  var STARTUP_TIMEOUT_MS = 25000;
+  setTimeout(function () { if (!rendered && app.textContent.indexOf("Loading") !== -1) renderFailure("startup_timeout"); }, STARTUP_TIMEOUT_MS);
+
+  try { refresh(); } catch (error) { renderFailure("render"); }
   // Slow enough to be invisible, fast enough that an approval in the browser
   // lands in this window without the user doing anything.
   setInterval(function () { if (!busy) refresh(); }, 3000);

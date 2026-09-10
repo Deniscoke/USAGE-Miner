@@ -31,6 +31,102 @@ const CSC = [
 const PRODUCT = "USAGE Miner";
 /** HKCU uninstall key name. Stable across versions so upgrades replace it. */
 const APP_KEY = "USAGEMiner";
+/** The GUI entry point installed beside the console executable. */
+export const LAUNCHER_NAME = "USAGE Miner.exe";
+
+/**
+ * Windows exit codes the installer uses. A cancelled install is not a failed
+ * one, and Program Compatibility Assistant treats an unmanifested "setup"
+ * that exits oddly as a broken installation; both are avoided by saying
+ * exactly what happened.
+ */
+export const EXIT_OK = 0;
+export const EXIT_FAILED = 1;
+export const EXIT_CANCELLED = 1223; // ERROR_CANCELLED
+
+/**
+ * The application manifest every executable we compile carries.
+ *
+ * asInvoker: a per-user install never needs, and never asks for, elevation.
+ * supportedOS: only Windows 10 and 11 -- the one family this is tested on
+ * (the GUID covers both). Declaring it is what tells Program Compatibility
+ * Assistant this is a modern application rather than a legacy installer to
+ * be second-guessed. dpiAware keeps the message boxes crisp.
+ */
+export function applicationManifest({ name, version }) {
+  const four = `${version.split(/[-+]/)[0].split(".").concat(["0", "0", "0"]).slice(0, 4).join(".")}`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="${name}" version="${four}" processorArchitecture="*"/>
+  <description>USAGE Miner</description>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>
+`;
+}
+
+/**
+ * The GUI launcher. Double-clicking USAGE Miner must open the app and
+ * nothing else -- no console window. The miner itself is a Node SEA, which
+ * is a console-subsystem executable and always brings a terminal with it.
+ * This tiny /target:winexe program starts it with its console hidden and
+ * its output sent nowhere, then exits. The console executable stays exactly
+ * as it is for the CLI (`status`, `run claude-code`, ...), which needs a
+ * terminal by nature.
+ */
+export function launcherSource({ exeName }) {
+  return `
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
+using System.Windows.Forms;
+
+static class Launcher {
+    [STAThread]
+    static int Main(string[] args) {
+        string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        string exe = Path.Combine(dir, ${JSON.stringify(exeName)});
+        if (!File.Exists(exe)) {
+            MessageBox.Show("USAGE Miner is not installed correctly: " + exe + " is missing. Reinstall USAGE Miner.",
+                "USAGE Miner", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+        try {
+            // Through cmd with output to nul, so the child has valid standard
+            // handles (a Node process writes a line on startup) and no window.
+            ProcessStartInfo info = new ProcessStartInfo("cmd.exe",
+                "/c \\"\\"" + exe + "\\" --desktop\\" > nul 2>&1");
+            info.CreateNoWindow = true;
+            info.UseShellExecute = false;
+            info.WorkingDirectory = dir;
+            Process.Start(info);
+            return 0;
+        } catch (Exception error) {
+            MessageBox.Show("USAGE Miner could not start: " + error.Message,
+                "USAGE Miner", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+    }
+}
+`;
+}
 
 function source({ version, exeName }) {
   return `
@@ -41,22 +137,15 @@ using System.Reflection;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-// The version resource Windows shows in file properties, and which SignPath
-// enforces as a file restriction on signed artifacts. Without it the installer
-// has no identity at all -- an unnamed executable asking to be trusted.
-[assembly: AssemblyTitle("USAGE Miner Setup")]
-[assembly: AssemblyProduct("USAGE Miner")]
-[assembly: AssemblyCompany("USAGE")]
-[assembly: AssemblyCopyright("Copyright 2026 USAGE. Apache License 2.0.")]
-[assembly: AssemblyDescription("Installs USAGE Miner for the current user.")]
-[assembly: AssemblyVersion(${JSON.stringify(version)} + ".0")]
-[assembly: AssemblyFileVersion(${JSON.stringify(version)} + ".0")]
-
 static class Setup {
     const string Product   = ${JSON.stringify(PRODUCT)};
     const string Version   = ${JSON.stringify(version)};
     const string ExeName   = ${JSON.stringify(exeName)};
+    const string Launcher  = ${JSON.stringify(LAUNCHER_NAME)};
     const string AppKey    = ${JSON.stringify(APP_KEY)};
+    const int ExitOk = ${EXIT_OK};
+    const int ExitFailed = ${EXIT_FAILED};
+    const int ExitCancelled = ${EXIT_CANCELLED};
 
     static string InstallDir {
         get {
@@ -83,6 +172,7 @@ static class Setup {
     }
 
     static string TargetExe { get { return Path.Combine(InstallDir, ExeName); } }
+    static string LauncherExe { get { return Path.Combine(InstallDir, Launcher); } }
     static string SetupCopy { get { return Path.Combine(InstallDir, "uninstall.exe"); } }
 
     [STAThread]
@@ -104,8 +194,16 @@ static class Setup {
             } catch {}
             if (!silent) MessageBox.Show(error.Message, Product,
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return 1;
+            return ExitFailed;
         }
+    }
+
+    static void Log(string line) {
+        try {
+            File.AppendAllText(
+                Path.Combine(Path.GetTempPath(), "usage-miner-setup.log"),
+                DateTime.UtcNow.ToString("o") + "  " + line + Environment.NewLine);
+        } catch {}
     }
 
     // ------------------------------------------------------------- install
@@ -118,7 +216,7 @@ static class Setup {
                 "It does not require administrator rights, does not install a service, " +
                 "and does not start with Windows.\\n\\nContinue?",
                 Product, MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
-            if (answer != DialogResult.OK) return 1;
+            if (answer != DialogResult.OK) return ExitCancelled;
         }
 
         Directory.CreateDirectory(InstallDir);
@@ -130,11 +228,21 @@ static class Setup {
             try { running.Kill(); running.WaitForExit(5000); } catch {}
         }
 
+        // An upgrade replaces the previous version's executable rather than
+        // leaving it beside the new one.
+        foreach (string old in Directory.GetFiles(InstallDir, "USAGE-Miner-*.exe")) {
+            if (!string.Equals(Path.GetFileName(old), ExeName, StringComparison.OrdinalIgnoreCase)) {
+                try { File.Delete(old); } catch {}
+            }
+        }
+
         Extract("payload", TargetExe);
+        Extract("launcher", LauncherExe);
         File.Copy(Assembly.GetExecutingAssembly().Location, SetupCopy, true);
 
-        CreateShortcut(StartMenuShortcut, TargetExe, InstallDir,
-            "Route your AI tools through USAGE", "");
+        // The Start menu opens the GUI launcher: no console window.
+        CreateShortcut(StartMenuShortcut, LauncherExe, InstallDir,
+            "Meter your AI tools with USAGE", "");
 
         // A second entry that starts Claude Code through USAGE directly.
         //
@@ -156,17 +264,29 @@ static class Setup {
             key.SetValue("InstallLocation", InstallDir);
             key.SetValue("UninstallString", "\\"" + SetupCopy + "\\" /uninstall");
             key.SetValue("QuietUninstallString", "\\"" + SetupCopy + "\\" /uninstall /S");
-            key.SetValue("DisplayIcon", TargetExe);
+            key.SetValue("DisplayIcon", LauncherExe);
             key.SetValue("NoModify", 1, RegistryValueKind.DWord);
             key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
             key.SetValue("EstimatedSize", (int)(new FileInfo(TargetExe).Length / 1024),
                 RegistryValueKind.DWord);
         }
 
-        if (!silent) {
-            Process.Start(new ProcessStartInfo(TargetExe) { WorkingDirectory = InstallDir });
+        // Success means every artifact exists. Returning 0 with a missing
+        // shortcut or registry entry would be the lie that PCA exists to catch.
+        string[] required = { TargetExe, LauncherExe, SetupCopy, StartMenuShortcut, ClaudeShortcut };
+        foreach (string file in required) {
+            if (!File.Exists(file)) throw new Exception("Installation is incomplete: " + file + " was not created.");
         }
-        return 0;
+        using (RegistryKey check = Registry.CurrentUser.OpenSubKey(
+                   @"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + AppKey)) {
+            if (check == null) throw new Exception("Installation is incomplete: the uninstall entry was not created.");
+        }
+        Log("installed " + Version + " to " + InstallDir);
+
+        if (!silent) {
+            Process.Start(new ProcessStartInfo(LauncherExe) { WorkingDirectory = InstallDir, UseShellExecute = true });
+        }
+        return ExitOk;
     }
 
     // ----------------------------------------------------------- uninstall
@@ -176,7 +296,7 @@ static class Setup {
             DialogResult answer = MessageBox.Show(
                 "Remove " + Product + "?", Product,
                 MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
-            if (answer != DialogResult.OK) return 1;
+            if (answer != DialogResult.OK) return ExitCancelled;
         }
 
         // The one thing an uninstaller must never do is leave the machine
@@ -202,6 +322,7 @@ static class Setup {
         try { File.Delete(StartMenuShortcut); } catch {}
         try { File.Delete(ClaudeShortcut); } catch {}
         try { File.Delete(TargetExe); } catch {}
+        try { File.Delete(LauncherExe); } catch {}
         try {
             Registry.CurrentUser.DeleteSubKeyTree(
                 @"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + AppKey, false);
@@ -224,7 +345,7 @@ static class Setup {
 
         if (!silent) MessageBox.Show(Product + " has been removed.", Product,
             MessageBoxButtons.OK, MessageBoxIcon.Information);
-        return 0;
+        return ExitOk;
     }
 
     // -------------------------------------------------------------- helpers
@@ -309,6 +430,34 @@ export function buildInstaller({ artifacts, exePath, version }) {
   const exeName = path.basename(exePath);
   const csPath = path.join(artifacts, "setup.cs");
   const setupPath = path.join(artifacts, `USAGE-Miner-${version}-Setup.exe`);
+  const manifestPath = path.join(artifacts, "app.manifest");
+  writeFileSync(manifestPath, applicationManifest({ name: "USAGE.Miner.Setup", version }));
+
+  // The GUI launcher first: it is embedded in the installer as a resource.
+  const launcherCs = path.join(artifacts, "launcher.cs");
+  const launcherPath = path.join(artifacts, LAUNCHER_NAME);
+  writeFileSync(launcherCs, launcherSource({ exeName }));
+  const launcherManifest = path.join(artifacts, "launcher.manifest");
+  writeFileSync(launcherManifest, applicationManifest({ name: "USAGE.Miner", version }));
+  execFileSync(
+    CSC,
+    [
+      "/nologo",
+      "/target:winexe",
+      "/platform:anycpu",
+      "/optimize+",
+      `/out:${launcherPath}`,
+      `/win32manifest:${launcherManifest}`,
+      "/reference:System.dll",
+      "/reference:System.Windows.Forms.dll",
+      launcherCs,
+    ],
+    { stdio: "inherit" },
+  );
+  rmSync(launcherCs, { force: true });
+  rmSync(launcherManifest, { force: true });
+  process.stdout.write(`  launcher ${(readFileSync(launcherPath).length / 1024).toFixed(0)} KB (GUI subsystem)\n`);
+
   writeFileSync(csPath, source({ version, exeName }));
 
   // The version resource is set from the command line rather than an
@@ -322,15 +471,18 @@ export function buildInstaller({ artifacts, exePath, version }) {
       "/platform:anycpu",
       "/optimize+",
       `/out:${setupPath}`,
+      `/win32manifest:${manifestPath}`,
       "/reference:System.dll",
       "/reference:System.Windows.Forms.dll",
       `/resource:${exePath},payload`,
+      `/resource:${launcherPath},launcher`,
       csPath,
     ],
     { stdio: "inherit" },
   );
 
   rmSync(csPath, { force: true });
+  rmSync(manifestPath, { force: true });
   const size = readFileSync(setupPath).length;
   process.stdout.write(`  setup   ${(size / 1024 / 1024).toFixed(1)} MB\n`);
   return setupPath;
