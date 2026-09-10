@@ -87,7 +87,10 @@ export interface MinerRoute {
   label: string;
   protocol: "anthropic_compatible" | "openai_compatible";
   url: string;
+  /** ROUTE capability (routable, measurable, priced). Not the reward. */
   miningEligibility: string;
+  /** The server's economic verdict for this route: eligible | held | ineligible | unavailable. */
+  rewardStatus?: "eligible" | "held" | "ineligible" | "unavailable";
   miningLabel: string;
 }
 

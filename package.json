@@ -1,6 +1,6 @@
 {
   "name": "usage-miner",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "private": true,
   "description": "USAGE Miner -- routes your AI tools through USAGE so their compute can be verified. Windows.",
   "type": "module",

@@ -363,12 +363,14 @@ function describeRoute(config: MinerConfig, chosen: ReturnType<typeof chooseRout
   if (!chosen) return { kind: "none", label: "No route", rewardStatus: "none", reason: "No AI route is available for Claude Code." };
   const provider = config.routes.find((r) => r.url === chosen.url);
   if (provider) {
-    const eligible = provider.miningEligibility === "eligible_route";
+    // The SERVER's economic verdict. `eligible_route` alone is route
+    // capability (routable, measurable, priced), never a reward.
+    const verdict = provider.rewardStatus ?? "held";
     return {
       kind: "provider",
       label: provider.label,
-      rewardStatus: eligible ? "eligible" : "held",
-      reason: eligible ? "Your own connected provider carries the traffic." : provider.miningLabel,
+      rewardStatus: verdict === "unavailable" ? "none" : verdict,
+      reason: provider.miningLabel,
     };
   }
   return {
