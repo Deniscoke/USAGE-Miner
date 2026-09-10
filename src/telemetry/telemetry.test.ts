@@ -282,7 +282,7 @@ describe("Gemini CLI normalization", () => {
 });
 
 describe("Codex normalization -- truthful about what is not there", () => {
-  it("takes counts only from response.completed, with no model and no id", () => {
+  it("takes counts and the shared model from response.completed, with no id and no account", () => {
     const payload = envelope([
       {
         attributes: [
@@ -293,8 +293,12 @@ describe("Codex normalization -- truthful about what is not there", () => {
           attr("cached_token_count", 300),
           attr("cache_write_token_count", 0),
           attr("reasoning_token_count", 50),
-          attr("tool_token_count", 0),
+          attr("tool_token_count", 1000),
           attr("model_reasoning_effort", "medium"),
+          attr("model", "gpt-6-astra"),
+          attr("user.email", SENSITIVE.email),
+          attr("user.account_id", "22491493-0000-4000-8000-000000000000"),
+          attr("conversation.id", "01a0aaaa-0000-4000-8000-000000000000"),
         ],
       },
       {
@@ -312,19 +316,25 @@ describe("Codex normalization -- truthful about what is not there", () => {
     ]);
     const observations = normalizeRecords(flattenOtlpLogs(payload), CODEX_MAPPING, { toolVersion: "0.153.3", localSessionId: "s" });
     expect(observations).toHaveLength(1);
-    expect(observations[0].model).toBeNull();
+    expect(observations[0].model).toBe("gpt-6-astra");
     expect(observations[0].upstreamRequestId).toBeNull();
     expect(observations[0].inputTokens).toBe(900);
     expect(observations[0].reasoningTokens).toBe(50);
+    // tool_token_count is a total on the wire; it must not be read as tool tokens.
+    expect(observations[0].toolTokens).toBeNull();
+    const serialized = JSON.stringify(observations);
+    expect(serialized).not.toContain("22491493");
+    expect(serialized).not.toContain("01a0aaaa");
+    expect(serialized).not.toContain(SENSITIVE.email);
     expect(JSON.stringify(observations)).not.toContain(SENSITIVE.command);
     expect(JSON.stringify(observations)).not.toContain(SENSITIVE.sourceCode);
   });
 
-  it("is declared experimental with a local-observed ceiling", () => {
+  it("is declared experimental with a local-observed ceiling: a model without an id verifies nothing", () => {
     const caps = codexAdapter.capabilities();
     expect(caps.experimental).toBe(true);
     expect(caps.verificationCeiling).toBe("local_observed");
-    expect(caps.reads).not.toContain("model");
+    expect(caps.reads).toContain("model");
     expect(caps.reads).not.toContain("request_id");
   });
 });

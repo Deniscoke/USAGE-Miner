@@ -1,19 +1,16 @@
-import { execFile } from "node:child_process";
 import { readFile, writeFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { configDir } from "../secrets.js";
 import {
   backupName,
+  probeVersion,
   type EnableResult,
   type LocalToolAdapter,
   type RouteConfig,
   type RoutingState,
   type ToolDetection,
 } from "./adapter.js";
-
-const run = promisify(execFile);
 
 /**
  * Claude Code.
@@ -96,12 +93,10 @@ export const claudeCodeAdapter: LocalToolAdapter = {
   async detect(): Promise<ToolDetection> {
     let version: string | null = null;
     let installed = false;
-    try {
-      const { stdout } = await run("claude", ["--version"], { windowsHide: true, timeout: 10_000 });
+    const text = await probeVersion("claude");
+    if (text !== null) {
       installed = true;
-      version = stdout.trim().split(/\s+/)[0] ?? null;
-    } catch {
-      installed = false;
+      version = text.split(/\s+/)[0] ?? null;
     }
     return { installed, version, configPath: settingsPath() };
   },

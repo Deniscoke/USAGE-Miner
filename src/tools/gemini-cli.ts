@@ -1,13 +1,10 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { probeVersion } from "./adapter.js";
 import type {
   EnableResult,
   LocalToolAdapter,
   RoutingState,
   ToolDetection,
 } from "./adapter.js";
-
-const run = promisify(execFile);
 
 /**
  * Gemini CLI.
@@ -82,8 +79,9 @@ export const geminiCliAdapter: LocalToolAdapter = {
 
   async detect(): Promise<ToolDetection> {
     try {
-      const { stdout } = await run("gemini", ["--version"], { windowsHide: true, timeout: 10_000, shell: true });
-      return { installed: true, version: stdout.trim().split(/\s+/).pop() ?? null, configPath: "" };
+      const text = await probeVersion("gemini");
+      if (text === null) return { installed: false, version: null, configPath: "" };
+      return { installed: true, version: text.split(/\s+/).pop() ?? null, configPath: "" };
     } catch {
       return { installed: false, version: null, configPath: "" };
     }

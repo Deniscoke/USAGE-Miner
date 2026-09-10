@@ -1,19 +1,16 @@
-import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { configDir } from "../secrets.js";
 import {
   backupName,
+  probeVersion,
   type EnableResult,
   type LocalToolAdapter,
   type RouteConfig,
   type RoutingState,
   type ToolDetection,
 } from "./adapter.js";
-
-const run = promisify(execFile);
 
 /**
  * Codex.
@@ -127,13 +124,15 @@ export const codexAdapter: LocalToolAdapter = {
   capabilities() {
     return {
       meteringMethods: ["native_otel", "routed"],
-      // Documented in codex-rs/otel/src/events/session_telemetry.rs: token
-      // counts on codex.sse_event(response.completed); no model attribute, no
-      // response id. Counts without identity are analytics, and are labelled so.
-      reads: ["tokens", "cache", "reasoning"],
+      // codex-rs/otel/src/events/session_telemetry.rs and a real wire capture
+      // of 0.153.3: codex.sse_event(response.completed) carries the token
+      // counts, and `model` rides on every event as a shared attribute. No
+      // request or response id anywhere. Counts and a model without an
+      // identity are analytics, and are labelled so.
+      reads: ["model", "tokens", "cache", "reasoning"],
       verificationCeiling: "local_observed",
       availabilityNote:
-        "Codex telemetry reports token counts but neither the model nor a request id, so usage is tracked but cannot be verified. Routing through USAGE is the stronger option.",
+        "Codex telemetry reports the model and token counts but no request id, so usage is tracked but cannot be correlated or verified. Routing through USAGE is the stronger option.",
       experimental: true,
     };
   },
@@ -180,16 +179,10 @@ export const codexAdapter: LocalToolAdapter = {
   },
 
   async detect(): Promise<ToolDetection> {
-    let version: string | null = null;
-    let installed = false;
-    try {
-      const { stdout } = await run("codex", ["--version"], { windowsHide: true, timeout: 10_000 });
-      installed = true;
-      version = stdout.trim().split(/\s+/).pop() ?? null;
-    } catch {
-      installed = false;
-    }
-    return { installed, version, configPath: configPath() };
+    // "codex-cli 0.153.3" -> "0.153.3". Through probeVersion, because the npm
+    // shim is a .cmd on Windows and a bare execFile never finds it.
+    const text = await probeVersion("codex");
+    return { installed: text !== null, version: text?.split(/\s+/).pop() ?? null, configPath: configPath() };
   },
 
   async inspectRouting(): Promise<RoutingState> {

@@ -49,6 +49,37 @@ async function readClaudeSettings(): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(claudeSettingsPath(), "utf8")) as Record<string, unknown>;
 }
 
+describe("tool detection finds what the user's shell finds", () => {
+  it("detects a CLI installed as an npm shim, the way codex is on Windows", async () => {
+    const bin = path.join(home, "bin");
+    await mkdir(bin, { recursive: true });
+    if (process.platform === "win32") {
+      await writeFile(path.join(bin, "codex.cmd"), "@echo codex-cli 9.9.9\r\n", "utf8");
+    } else {
+      await writeFile(path.join(bin, "codex"), "#!/bin/sh\necho codex-cli 9.9.9\n", { encoding: "utf8", mode: 0o755 });
+    }
+    const previous = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${previous ?? ""}`;
+    try {
+      const detected = await codexAdapter.detect();
+      expect(detected.installed).toBe(true);
+      expect(detected.version).toBe("9.9.9");
+    } finally {
+      process.env.PATH = previous;
+    }
+  });
+
+  it("reports a tool that is genuinely absent as absent", async () => {
+    const previous = process.env.PATH;
+    process.env.PATH = path.join(home, "empty");
+    try {
+      expect((await codexAdapter.detect()).installed).toBe(false);
+    } finally {
+      process.env.PATH = previous;
+    }
+  });
+});
+
 describe("Claude Code adapter", () => {
   it("starts off when nothing is configured", async () => {
     expect(await claudeCodeAdapter.inspectRouting()).toEqual({ state: "off" });

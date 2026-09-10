@@ -93,12 +93,17 @@ export const CODEX_MAPPING: TelemetryMapping = {
   eventNames: ["codex.sse_event", "sse_event"],
   accept: (attributes) => attributes["event.kind"] === "response.completed",
   fields: {
+    // A shared attribute on every Codex event (codex-rs/otel/src/events/shared.rs),
+    // confirmed on the wire from 0.153.3. `user.email` and `user.account_id`
+    // ride alongside it on every event and are never named here.
+    model: "model",
     inputTokens: "input_token_count",
     outputTokens: "output_token_count",
     cacheReadTokens: "cached_token_count",
     cacheWriteTokens: "cache_write_token_count",
     reasoningTokens: "reasoning_token_count",
-    toolTokens: "tool_token_count",
+    // `tool_token_count` is NOT read: on the wire (0.153.3) it equals
+    // input + output, a total, and summing it would double-count.
   },
 };
 

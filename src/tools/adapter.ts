@@ -1,3 +1,8 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const run = promisify(execFile);
+
 /**
  * The local tool boundary.
  *
@@ -154,6 +159,30 @@ export interface LocalToolAdapter {
 }
 
 /** Where a rollback copy of a tool's configuration is kept. */
+/**
+ * Run `<command> --version` the way the user's shell would.
+ *
+ * npm installs a CLI on Windows as a `<name>.cmd` shim, and Node refuses to
+ * spawn a .cmd/.bat file without a shell (the CVE-2024-27980 hardening).
+ * Claude Code ships a native .exe, so `execFile("claude")` works while
+ * `execFile("codex")` fails with ENOENT -- which is exactly the bug where
+ * `codex --version` worked in a terminal and the packaged miner reported Codex
+ * not installed. The command names here are fixed literals, never input, so
+ * the shell sees nothing a user typed.
+ */
+export async function probeVersion(command: "claude" | "codex" | "gemini"): Promise<string | null> {
+  try {
+    const { stdout } =
+      process.platform === "win32"
+        ? await run(`${command} --version`, [], { windowsHide: true, timeout: 10_000, shell: true })
+        : await run(command, ["--version"], { windowsHide: true, timeout: 10_000 });
+    const text = stdout.trim();
+    return text.length > 0 ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 export function backupName(id: ToolId): string {
   return `${id}.backup.json`;
 }
