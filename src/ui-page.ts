@@ -236,13 +236,19 @@ export function renderApp(nonce: string): string {
       anyTracking ? "TRACKING ACTIVE" : anyMapped ? "MAPPED · IDLE" : "NOT MAPPED"));
     today.appendChild(todayHead);
     if (state.usage) {
+      // AI USAGE: input, output, cache read, cache write -- four numbers the
+      // server summed, never one number. A request that read 28k tokens from
+      // cache is not "20 tokens".
+      var tb = state.usage.tracked || { inputTokens: state.usage.trackedTokens, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, requestCount: 0 };
+      today.appendChild(el("div", "meta", "AI usage tracked · " + tb.requestCount + " request" + (tb.requestCount === 1 ? "" : "s") + " · this PC reported"));
       var grid = el("div", "grid");
-      [
-        ["Tracked", fmtTokens(state.usage.trackedTokens) + " tokens", "this PC reported"],
-        ["Verified", fmtTokens(state.usage.verifiedTokens) + " tokens", "confirmed by USAGE"],
-        ["Eligible", fmtMicros(state.usage.eligibleComputeMicros), "allowed to earn"],
-        ["USAGE", state.usage.estimatedPoints ? "+" + state.usage.estimatedPoints : "—", "until the epoch settles"]
-      ].forEach(function (cell) {
+      var cells = [
+        ["Input", fmtTokens(tb.inputTokens), "fresh tokens read"],
+        ["Output", fmtTokens(tb.outputTokens), "tokens written" + (tb.reasoningTokens ? " · " + fmtTokens(tb.reasoningTokens) + " reasoning" : "")],
+        ["Cache read", fmtTokens(tb.cacheReadTokens), "reused from cache"],
+        ["Cache write", fmtTokens(tb.cacheWriteTokens), "stored to cache"]
+      ];
+      cells.forEach(function (cell) {
         var c = el("div", "cell");
         c.appendChild(el("div", "cell-label", cell[0]));
         c.appendChild(el("div", "cell-value tnum", cell[1]));
@@ -250,11 +256,32 @@ export function renderApp(nonce: string): string {
         grid.appendChild(c);
       });
       today.appendChild(grid);
+      var vb = state.usage.verified || { requestCount: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+      var grid2 = el("div", "grid");
+      [
+        ["Verified by USAGE", vb.requestCount + " req · " + fmtTokens(state.usage.verifiedTokens) + " fresh", "trusted records only"],
+        ["Eligible", fmtMicros(state.usage.eligibleComputeMicros), "allowed to earn · versioned pricing, not token counts"],
+        ["USAGE", state.usage.estimatedPoints ? "+" + state.usage.estimatedPoints : "—", "until the epoch settles"]
+      ].forEach(function (cell) {
+        var c = el("div", "cell");
+        c.appendChild(el("div", "cell-label", cell[0]));
+        c.appendChild(el("div", "cell-value tnum", cell[1]));
+        c.appendChild(el("div", "cell-hint", cell[2]));
+        grid2.appendChild(c);
+      });
+      today.appendChild(grid2);
       if (state.usage.recent && state.usage.recent.length) {
         var feed = el("div", "feed");
         state.usage.recent.slice(0, 6).forEach(function (r) {
           var line = el("div", "row");
-          line.appendChild(el("span", "meta", toolName(state, r.tool) + " · " + fmtTokens(r.tokens) + " tokens · " + fmtTime(r.at)));
+          var b = r.breakdown;
+          var detail = b
+            ? fmtTokens(b.inputTokens) + " in · " + fmtTokens(b.outputTokens) + " out" +
+              (b.cacheReadTokens ? " · " + fmtTokens(b.cacheReadTokens) + " cache read" : "") +
+              (b.cacheWriteTokens ? " · " + fmtTokens(b.cacheWriteTokens) + " cache write" : "") +
+              (b.reasoningTokens ? " · " + fmtTokens(b.reasoningTokens) + " reasoning" : "")
+            : fmtTokens(r.tokens) + " fresh tokens";
+          line.appendChild(el("span", "meta", toolName(state, r.tool) + (r.model ? " · " + r.model : "") + " · " + detail + " · " + fmtTime(r.at)));
           line.appendChild(el("span", "tag " + (r.status === "tracked" ? "off" : "on"),
             r.status === "tracked" ? "TRACKED" : r.status === "routed" ? "ROUTED ✓" : "VERIFIED ✓"));
           feed.appendChild(line);

@@ -257,13 +257,26 @@ export function uploadTelemetry(
 }
 
 /** Today's tracked / verified / eligible figures, as the server computes them. */
+export interface UsageBreakdown {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  requestCount: number;
+}
+
 export interface DeviceUsageSummary {
   day: string;
+  /** Fresh (input + output) tokens. One figure, named as such. */
   trackedTokens: number;
   verifiedTokens: number;
+  /** Every category, as the SERVER summed it. The window displays, never adds. */
+  tracked?: UsageBreakdown;
+  verified?: UsageBreakdown;
   eligibleComputeMicros: number;
   estimatedPoints: string | null;
-  recent: { tool: string; tokens: number; status: "tracked" | "verified" | "routed"; at: string }[];
+  recent: { tool: string; model?: string | null; tokens: number; breakdown?: UsageBreakdown; status: "tracked" | "verified" | "routed"; at: string }[];
 }
 
 export function fetchDeviceUsage(serverUrl: string, token: string): Promise<DeviceUsageSummary> {
