@@ -165,7 +165,10 @@ async function status(): Promise<void> {
   out("  USAGE MINER");
   out("");
   out(`  Device      ${credential.deviceName}`);
-  out(`  Account     ${config.account.label}`);
+  // `label` is the credential's name, which for a paired device is the device
+  // name -- printing it here repeated the line above and told nobody which
+  // USAGE account this PC belongs to. `display` is the masked email.
+  out(`  Account     ${config.account.display ?? config.account.label}`);
   out(`  Network     ${config.mining.network}`);
   if (config.updateRequired) {
     out(`  Update      required (minimum ${config.minimumMinerVersion}, this is ${VERSION})`);
@@ -178,8 +181,19 @@ async function status(): Promise<void> {
     out("");
   } else {
     out("  CONNECTED PROVIDERS");
+    // One line per CONNECTION, not per route. A connection that answers both
+    // wire surfaces -- OpenRouter does -- produces two routes with the same id
+    // and the same verdict, and listing both read as two separate accounts.
+    const seen = new Set<string>();
     for (const route of config.routes) {
+      if (seen.has(route.connectionId)) continue;
+      seen.add(route.connectionId);
+      const surfaces = config.routes
+        .filter((other) => other.connectionId === route.connectionId)
+        .map((other) => other.surfaceLabel ?? other.protocol)
+        .join(", ");
       out(`    ${route.label.padEnd(24)} ${route.miningLabel}`);
+      out(`    ${" ".repeat(24)} carries: ${surfaces}`);
     }
     out("");
   }
@@ -202,10 +216,24 @@ async function status(): Promise<void> {
             ? "config unreadable"
             : "off";
     if (routing.state === "usage") enabled.push(adapter.id);
+    // A tool USAGE starts rather than configures has no persistent on/off to
+    // report: its routing lives in the session USAGE launches and is gone when
+    // that session ends. Printing "off" suggested something was switched off
+    // and could be switched on, which is not how Claude Code works here.
+    const launchOnly = adapter.persistentConfig === "unsafe";
+    const meterable = !adapter.capabilities().meteringMethods.includes("unsupported");
+    const reported =
+      !meterable
+        // Says what it is instead of implying a switch, and never invites
+        // someone to route a tool USAGE cannot measure.
+        ? "cannot be metered here"
+        : launchOnly && routing.state !== "foreign"
+          ? "start it with: usage run " + adapter.id
+          : state;
     out(
       `    ${adapter.displayName.padEnd(14)} installed${
         detection.version ? ` ${detection.version}` : ""
-      }  ·  ${state}`,
+      }  ·  ${reported}`,
     );
   }
   out("");

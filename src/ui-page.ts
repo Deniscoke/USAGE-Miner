@@ -261,7 +261,7 @@ export function renderApp(nonce: string): string {
       [
         ["Verified by USAGE", vb.requestCount + " req · " + fmtTokens(state.usage.verifiedTokens) + " fresh", "trusted records only"],
         ["Eligible", fmtMicros(state.usage.eligibleComputeMicros), "allowed to earn · versioned pricing, not token counts"],
-        ["USAGE", state.usage.estimatedPoints ? "+" + state.usage.estimatedPoints : "—", "until the epoch settles"]
+        ["USAGE", state.usage.estimatedPoints ? "+" + state.usage.estimatedPoints : "—", "credited when the day settles, just after midnight UTC"]
       ].forEach(function (cell) {
         var c = el("div", "cell");
         c.appendChild(el("div", "cell-label", cell[0]));
