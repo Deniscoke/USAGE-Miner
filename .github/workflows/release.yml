@@ -59,6 +59,10 @@ on:
         description: "Mark the release as a prerelease (GitHub then never treats it as 'latest')"
         type: boolean
         default: true
+      attach_to_existing:
+        description: "If a release already exists for this tag, upload these assets to it"
+        type: boolean
+        default: false
 
 # Least privilege. `contents: write` only because the release job attaches
 # assets; nothing here needs packages, deployments, or issue access.
@@ -91,6 +95,10 @@ jobs:
       SIGN_EXPLICIT: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
       SIGNPATH_CONFIGURED: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
       PRERELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
+      # Never implied. Attaching binaries to a release somebody has already
+      # published is a public act, so it happens only when a person asks for it
+      # on the dispatch form -- never on a tag push.
+      ATTACH_TO_EXISTING: ${{ github.event_name == 'workflow_dispatch' && inputs.attach_to_existing }}
 
     steps:
       # Refuse before touching a secret. A tag named anything else, or a manual
@@ -261,7 +269,14 @@ jobs:
       # `releases/latest/download/<asset>` resolves to nothing while this flag
       # is set. That is a real tradeoff and it is the publisher's to make, which
       # is why it is an input rather than a constant.
-      - name: Create draft release
+      #
+      # WHEN THE RELEASE ALREADY EXISTS. v0.4.5 was published by hand as an
+      # empty release, and a build that then fails with "release already
+      # exists" leaves a download page pointing at nothing. So this step can
+      # upload into an existing release instead -- but only when a person ticks
+      # the box, because that writes bytes to something already public. Without
+      # the box it fails loudly rather than either overwriting or shrugging.
+      - name: Publish release assets
         if: ${{ env.SHOULD_PUBLISH == 'true' }}
         shell: pwsh
         env:
@@ -271,14 +286,29 @@ jobs:
           $label = if ($env:SIGNED -eq 'true') { 'signed' } else { 'UNSIGNED' }
           $version = (Get-Content package.json | ConvertFrom-Json).version
           $tag = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF -replace 'refs/tags/','' } else { "v$version" }
+          $assets = Get-ChildItem dist/release | ForEach-Object { $_.FullName }
 
-          $notes = "Built from $env:GITHUB_SHA by run $env:GITHUB_RUN_ID on a GitHub-hosted runner. " +
-                   "Artifacts are $label. Verify the SHA-256 in SHA256SUMS.txt before running."
+          gh release view $tag --json tagName | Out-Null
+          $exists = ($LASTEXITCODE -eq 0)
+          $global:LASTEXITCODE = 0
 
-          $arguments = @('release', 'create', $tag, '--draft')
-          if ($env:PRERELEASE -eq 'true') { $arguments += '--prerelease' }
-          $arguments += @('--title', "USAGE Miner $version ($label)", '--notes', $notes)
-          $arguments += (Get-ChildItem dist/release | ForEach-Object { $_.FullName })
+          if ($exists) {
+            if ($env:ATTACH_TO_EXISTING -ne 'true') {
+              Write-Output "::error::a release for $tag already exists. Re-run with attach_to_existing to upload these assets to it."
+              exit 1
+            }
+            Write-Output "attaching $($assets.Count) assets to the existing $tag"
+            & gh release upload $tag --clobber @assets
+          }
+          else {
+            $notes = "Built from $env:GITHUB_SHA by run $env:GITHUB_RUN_ID on a GitHub-hosted runner. " +
+                     "Artifacts are $label. Verify the SHA-256 in SHA256SUMS.txt before running."
 
-          Write-Output "publishing $tag with $((Get-ChildItem dist/release).Count) assets"
-          & gh @arguments
+            $arguments = @('release', 'create', $tag, '--draft')
+            if ($env:PRERELEASE -eq 'true') { $arguments += '--prerelease' }
+            $arguments += @('--title', "USAGE Miner $version ($label)", '--notes', $notes)
+            $arguments += $assets
+
+            Write-Output "creating draft $tag with $($assets.Count) assets"
+            & gh @arguments
+          }
