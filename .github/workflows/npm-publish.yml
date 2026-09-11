@@ -1,0 +1,123 @@
+# Publish USAGE Miner to npm.
+#
+# WHY THIS EXISTS. The Windows installer is unsigned, so SmartScreen warns
+# about it, and it will keep warning until a signing identity exists and
+# accumulates reputation. `npx usage-miner` sidesteps that honestly rather than
+# cleverly: no unknown binary is executed at all. The code runs under the user's
+# own node.exe, which Windows already trusts, and its integrity comes from npm's
+# own hashes plus the provenance attestation this workflow produces.
+#
+# That distinction matters. Telling someone to launch an unsigned executable
+# from a terminal so the prompt does not appear is hiding a warning. Shipping
+# source that a trusted runtime executes removes the reason for the warning.
+#
+# TRUSTED PUBLISHING. There is no NPM_TOKEN here, and there must never be one.
+# npm is configured to accept publishes from THIS repository and THIS workflow
+# file via OIDC, so a leaked secret cannot publish the package and a fork
+# cannot either. Provenance attestations are generated automatically under
+# trusted publishing, which is what lets anyone verify that a published version
+# was built from a specific public commit by a specific workflow run.
+#
+# If this file is renamed, publishing stops working until the trusted publisher
+# configuration on npmjs.com is updated to the new filename. That is the
+# intended failure mode: it fails closed, loudly, rather than falling back to
+# some other credential.
+
+name: Publish to npm
+
+on:
+  # A published GitHub release is the human decision. npm follows it, so the
+  # two distribution channels cannot drift apart.
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # The same runner as the release build. Several tests exercise Windows
+    # junctions and Windows paths, and a publish should run what a release
+    # runs.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      # The OIDC token trusted publishing authenticates with. Nothing else in
+      # this workflow needs a credential.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.13.1"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing needs npm 11.5.1 or later; the version bundled with
+      # Node moves independently, so this is pinned to a floor rather than
+      # assumed.
+      - name: npm new enough to publish with OIDC
+        run: |
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Test
+        run: |
+          npm run typecheck
+          npm test
+
+      # A package published from a release must be the version that release
+      # names. Catching it here beats an npm version nobody can withdraw.
+      - name: Version matches the release tag
+        if: ${{ github.event_name == 'release' }}
+        shell: bash
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "package $version, tag $tag"
+          case "$tag" in
+            "v$version"|"v$version-"*) echo "match" ;;
+            *) echo "::error::tag $tag does not name version $version"; exit 1 ;;
+          esac
+
+      # The guard that keeps this package small and boring.
+      #
+      # `dist/` is also where the packaging script leaves the 90 MB installer
+      # and the SEA blob, so a careless edit to the `files` list would ship
+      # binaries inside an npm package -- which is both a 140 MB download and
+      # exactly the kind of opaque payload nobody should accept from a registry.
+      # An npm tarball here holds compiled JavaScript and papers, or the publish
+      # does not happen.
+      - name: The tarball contains no binaries
+        shell: bash
+        run: |
+          rm -rf pack-check && mkdir pack-check
+          npm pack --pack-destination pack-check
+          tarball=$(ls pack-check/*.tgz)
+          echo "tarball: $tarball"
+          tar -tzf "$tarball"
+
+          if tar -tzf "$tarball" | grep -Ei '\.(exe|dll|blob|node)$'; then
+            echo "::error::the npm tarball contains a binary; check the files list in package.json"
+            exit 1
+          fi
+
+          size=$(wc -c < "$tarball")
+          echo "packed size: $size bytes"
+          if [ "$size" -gt 5000000 ]; then
+            echo "::error::the npm tarball is ${size} bytes; compiled JavaScript should be a fraction of that"
+            exit 1
+          fi
+
+      # No token, no --provenance flag: trusted publishing supplies the identity
+      # and attaches provenance by itself.
+      - name: Publish
+        run: npm publish

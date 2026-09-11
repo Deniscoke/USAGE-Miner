@@ -61,6 +61,29 @@ than overwritten.
 
 ## Install
 
+### With Node already installed
+
+```
+npx usage-miner
+```
+
+That is the whole thing. It opens the same window the installer gives you, and
+Windows shows no warning, because nothing unknown is being executed: the code
+runs under the node.exe you already have and already trust.
+
+This is not a way around SmartScreen, it removes the reason for it. The
+installer below is an unsigned executable, and Windows is right to ask about
+those. An npm package is source that a trusted runtime runs, with npm's own
+integrity checks and a provenance attestation linking the published version to
+the exact commit and workflow run that built it.
+
+Windows only. npm refuses the install elsewhere, because the miner drives
+Windows tools, stores its credential with DPAPI and writes Windows junctions.
+
+Prefer a permanent command? `npm install -g usage-miner`, then `usage`.
+
+### Without Node
+
 Download the installer from the
 [USAGE download page](https://usage-ten.vercel.app/download), or from
 [Releases](https://github.com/Deniscoke/USAGE-Miner/releases).

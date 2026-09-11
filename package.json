@@ -1,10 +1,10 @@
 {
   "name": "usage-miner",
   "version": "0.4.5",
-  "private": true,
-  "description": "USAGE Miner -- routes your AI tools through USAGE so their compute can be verified. Windows.",
+  "description": "Routes the AI tools already on your Windows PC through USAGE, so their compute can be verified. Run it with npx and there is no installer to trust.",
   "type": "module",
   "bin": {
+    "usage-miner": "./dist/app.js",
     "usage": "./dist/app.js"
   },
   "scripts": {
@@ -12,7 +12,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "package": "node scripts/package.mjs --with-installer",
-    "dev": "node --import tsx src/cli.ts"
+    "dev": "node --import tsx src/cli.ts",
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=20"
@@ -30,5 +31,31 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/Deniscoke/USAGE-Miner"
+  },
+  "keywords": [
+    "usage",
+    "ai",
+    "claude-code",
+    "codex",
+    "openrouter",
+    "telemetry",
+    "windows"
+  ],
+  "homepage": "https://usage-ten.vercel.app/download",
+  "bugs": {
+    "url": "https://github.com/Deniscoke/USAGE-Miner/issues"
+  },
+  "files": [
+    "dist/**/*.js",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "os": [
+    "win32"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
