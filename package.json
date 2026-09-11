@@ -4,8 +4,8 @@
   "description": "Routes the AI tools already on your Windows PC through USAGE, so their compute can be verified. Run it with npx and there is no installer to trust.",
   "type": "module",
   "bin": {
-    "usage-miner": "./dist/app.js",
-    "usage": "./dist/app.js"
+    "usage-miner": "dist/app.js",
+    "usage": "dist/app.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -30,7 +30,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Deniscoke/USAGE-Miner"
+    "url": "git+https://github.com/Deniscoke/USAGE-Miner.git"
   },
   "keywords": [
     "usage",

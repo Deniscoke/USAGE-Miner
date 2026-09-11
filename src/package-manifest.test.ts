@@ -48,9 +48,26 @@ describe("the published npm package", () => {
 
   it("runs under the name people type", () => {
     // `npx usage-miner` resolves the bin whose name matches the package.
-    expect(pkg.bin["usage-miner"]).toBe("./dist/app.js");
+    expect(pkg.bin["usage-miner"]).toBe("dist/app.js");
     // Every command in the docs and in the app's own help says `usage ...`.
-    expect(pkg.bin.usage).toBe("./dist/app.js");
+    expect(pkg.bin.usage).toBe("dist/app.js");
+  });
+
+  it("declares bin targets the way npm will actually accept", () => {
+    // npm 11.8 silently DROPS a bin entry whose value starts with "./" --
+    // "script name dist/app.js was invalid and removed", a warning among
+    // dozens of lines of publish output. The package still publishes, still
+    // installs, and has no command in it, so `npx usage-miner` fails for
+    // everyone while the tarball looks perfect.
+    //
+    // It also drops an entry whose target does not exist on disk yet, which is
+    // why the publish workflow builds before it publishes rather than relying
+    // on the prepack hook: npm validates package.json before prepack runs.
+    for (const [name, target] of Object.entries(pkg.bin)) {
+      expect(target.startsWith("./"), name).toBe(false);
+      expect(target.startsWith("/"), name).toBe(false);
+      expect(target.endsWith(".js"), name).toBe(true);
+    }
   });
 
   it("refuses to install where it cannot work", () => {

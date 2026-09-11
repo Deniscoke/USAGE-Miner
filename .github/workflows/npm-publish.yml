@@ -74,6 +74,28 @@ jobs:
           npm run typecheck
           npm test
 
+      # Before publish, not as a prepack hook. npm validates package.json --
+      # including whether each `bin` target exists -- when the command starts,
+      # which is BEFORE prepack could build it, and a bin whose file is missing
+      # is dropped from the published manifest with a warning rather than an
+      # error. A package that installs cleanly and has no command in it is the
+      # worst possible outcome, so dist exists before npm is asked to publish.
+      - name: Build
+        run: npm run build
+
+      - name: The published package actually carries its command
+        shell: bash
+        run: |
+          test -f dist/app.js || { echo "::error::dist/app.js is missing"; exit 1; }
+          head -1 dist/app.js | grep -q "^#!/usr/bin/env node" || {
+            echo "::error::dist/app.js lost its shebang; npx would not be able to run it"
+            exit 1
+          }
+          if npm publish --dry-run 2>&1 | grep -i "invalid and removed"; then
+            echo "::error::npm dropped an entry from package.json; the published package would be broken"
+            exit 1
+          fi
+
       # A package published from a release must be the version that release
       # names. Catching it here beats an npm version nobody can withdraw.
       - name: Version matches the release tag
