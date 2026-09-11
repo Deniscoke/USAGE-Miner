@@ -9,14 +9,15 @@
 #
 # THE ORDER IS THE POINT:
 #
-#   test -> build -> package -> upload artifact -> SIGN -> verify -> checksum
+#   test -> build -> package -> upload artifact -> SIGN -> verify -> stage -> release
 #
 # Signing happens BEFORE the published checksums, because an Authenticode
 # signature is appended to the PE and changes every byte after it; a checksum
 # taken earlier describes a file nobody will download. Nothing modifies a signed
 # binary afterwards -- no repack, no resource edit, no icon fix -- because each
-# of those silently invalidates the signature. That is also why the version
-# resource is stamped during `npm run package`, well before signing.
+# of those silently invalidates the signature. Staging copies files and renames
+# them; it never rewrites their bytes. That is also why the version resource is
+# stamped during `npm run package`, well before signing.
 #
 # FAIL CLOSED. If signing was requested and the result does not verify, or
 # verifies to an unexpected publisher, the job fails and nothing is published. A
@@ -54,6 +55,10 @@ on:
         description: "Create a draft GitHub release"
         type: boolean
         default: true
+      prerelease:
+        description: "Mark the release as a prerelease (GitHub then never treats it as 'latest')"
+        type: boolean
+        default: true
 
 # Least privilege. `contents: write` only because the release job attaches
 # assets; nothing here needs packages, deployments, or issue access.
@@ -72,6 +77,21 @@ jobs:
     # reached by a workflow run from anywhere but an approved ref.
     environment: release
 
+    # Decided once, in one place.
+    #
+    # `inputs.*` is NULL on a tag push -- there is no dispatch form to read --
+    # and GitHub casts null and false to the same number when comparing across
+    # types. So `inputs.publish != false` evaluated to FALSE for every tag,
+    # which is why v0.4.5 built cleanly and published nothing: the release step
+    # was skipped by a condition meant to be its default. Absence must be read
+    # as "the default applies", never as "false".
+    env:
+      SHOULD_PUBLISH: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
+      SIGN_REQUESTED: ${{ github.event_name != 'workflow_dispatch' || inputs.sign }}
+      SIGN_EXPLICIT: ${{ github.event_name == 'workflow_dispatch' && inputs.sign }}
+      SIGNPATH_CONFIGURED: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+      PRERELEASE: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
+
     steps:
       # Refuse before touching a secret. A tag named anything else, or a manual
       # dispatch from a topic branch, is not a release -- and a signing
@@ -86,6 +106,22 @@ jobs:
             refs/heads/main) echo "manual dispatch from main accepted" ;;
             *) echo "::error::refusing to run a release from $GITHUB_REF"; exit 1 ;;
           esac
+
+      # Asking for a signed build and getting an unsigned one is the failure
+      # this prevents. An implied request (a tag push, where signing is simply
+      # the default) degrades to unsigned and says so; an explicit one fails.
+      - name: Signing is possible if it was asked for
+        shell: bash
+        run: |
+          echo "sign requested: $SIGN_REQUESTED (explicit: $SIGN_EXPLICIT)"
+          echo "signpath configured: $SIGNPATH_CONFIGURED"
+          if [ "$SIGN_EXPLICIT" = "true" ] && [ "$SIGNPATH_CONFIGURED" != "true" ]; then
+            echo "::error::signing was requested but SIGNPATH_ORGANIZATION_ID is not set"
+            exit 1
+          fi
+          if [ "$SIGN_REQUESTED" = "true" ] && [ "$SIGNPATH_CONFIGURED" != "true" ]; then
+            echo "::warning::SignPath is not configured; this run produces an UNSIGNED build"
+          fi
 
       - name: Checkout the exact commit
         uses: actions/checkout@v4
@@ -138,7 +174,7 @@ jobs:
 
       - name: Submit to SignPath
         id: signpath
-        if: ${{ inputs.sign != false }}
+        if: ${{ env.SIGN_REQUESTED == 'true' && env.SIGNPATH_CONFIGURED == 'true' }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -154,7 +190,7 @@ jobs:
       # just the installer: the standalone executable is published too, and a
       # user who downloads it deserves the same guarantee.
       - name: Verify Authenticode
-        if: ${{ inputs.sign != false }}
+        if: ${{ steps.signpath.outcome == 'success' }}
         shell: pwsh
         env:
           EXPECTED_PUBLISHER: ${{ vars.SIGNPATH_EXPECTED_PUBLISHER }}
@@ -187,19 +223,8 @@ jobs:
           }
           if ($failed) { exit 1 }
 
-      # Recomputed over the SIGNED bytes -- the ones people actually download --
-      # and over release.json too, so the manifest the website reads describes
-      # the signed files rather than the inputs to signing.
-      - name: Final checksums
-        if: ${{ inputs.sign != false }}
-        shell: bash
-        run: |
-          cd dist/signed
-          sha256sum *.exe | tee SHA256SUMS.txt
-          node "$GITHUB_WORKSPACE/scripts/restamp-manifest.mjs" .
-
       - name: Upload signed artifact
-        if: ${{ inputs.sign != false }}
+        if: ${{ steps.signpath.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: usage-miner-signed
@@ -208,27 +233,52 @@ jobs:
 
       # ------------------------------------------------------------ release
 
+      # What gets published, under the names people will link to.
+      #
+      # The source directory is chosen by whether signing ACTUALLY RAN, not by
+      # whether it was asked for, so an unsigned artifact cannot be published
+      # under a "signed" label by forgetting a flag. Checksums and release.json
+      # are recomputed over the staged copies -- the exact bytes, under the
+      # exact names, that the website will show a hash for.
+      - name: Stage release assets
+        if: ${{ env.SHOULD_PUBLISH == 'true' }}
+        shell: bash
+        env:
+          SIGNED: ${{ steps.signpath.outcome == 'success' }}
+        run: |
+          if [ "$SIGNED" = "true" ]; then
+            node scripts/stage-release.mjs dist/signed dist/release --signed
+          else
+            node scripts/stage-release.mjs dist/artifacts dist/release
+          fi
+
       # Draft, never published automatically. Attaching binaries to a public
       # release is an outward-facing act, and it stays a decision a person makes
-      # after comparing checksums against their own rebuild.
+      # after comparing checksums against their own rebuild. The draft is
+      # created; publishing it is a click in the GitHub UI.
       #
-      # The source directory is chosen by whether signing actually ran, so an
-      # unsigned artifact cannot be published under a "signed" label by
-      # forgetting a flag.
+      # A prerelease is never GitHub's "latest", so
+      # `releases/latest/download/<asset>` resolves to nothing while this flag
+      # is set. That is a real tradeoff and it is the publisher's to make, which
+      # is why it is an input rather than a constant.
       - name: Create draft release
-        if: ${{ inputs.publish != false }}
+        if: ${{ env.SHOULD_PUBLISH == 'true' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          SIGNED: ${{ inputs.sign != false }}
+          SIGNED: ${{ steps.signpath.outcome == 'success' }}
         run: |
-          $dir   = if ($env:SIGNED -eq 'true') { 'dist/signed' } else { 'dist/artifacts' }
           $label = if ($env:SIGNED -eq 'true') { 'signed' } else { 'UNSIGNED' }
           $version = (Get-Content package.json | ConvertFrom-Json).version
           $tag = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF -replace 'refs/tags/','' } else { "v$version" }
 
-          gh release create $tag `
-            --draft --prerelease `
-            --title "USAGE Miner $version ($label)" `
-            --notes "Built from $env:GITHUB_SHA by run $env:GITHUB_RUN_ID on a GitHub-hosted runner. Artifacts are $label. Verify the SHA-256 before running." `
-            (Get-ChildItem $dir | ForEach-Object { $_.FullName })
+          $notes = "Built from $env:GITHUB_SHA by run $env:GITHUB_RUN_ID on a GitHub-hosted runner. " +
+                   "Artifacts are $label. Verify the SHA-256 in SHA256SUMS.txt before running."
+
+          $arguments = @('release', 'create', $tag, '--draft')
+          if ($env:PRERELEASE -eq 'true') { $arguments += '--prerelease' }
+          $arguments += @('--title', "USAGE Miner $version ($label)", '--notes', $notes)
+          $arguments += (Get-ChildItem dist/release | ForEach-Object { $_.FullName })
+
+          Write-Output "publishing $tag with $((Get-ChildItem dist/release).Count) assets"
+          & gh @arguments

@@ -61,9 +61,23 @@ than overwritten.
 
 ## Install
 
-Download the installer from
-[Releases](https://github.com/Deniscoke/USAGE-Miner/releases), or from the
-[USAGE download page](https://usage-ten.vercel.app/miners/install).
+Download the installer from the
+[USAGE download page](https://usage-ten.vercel.app/download), or from
+[Releases](https://github.com/Deniscoke/USAGE-Miner/releases).
+
+Published assets have stable names, so a link to one keeps working across
+versions:
+
+| Asset | What it is |
+| --- | --- |
+| `USAGE-Miner-Windows-x64-Setup.exe` | The installer. This is the download. |
+| `USAGE-Miner-Windows-x64.exe` | The same app with no installer, for anyone who prefers one file. |
+| `SHA256SUMS.txt` | Checksums over exactly those bytes. |
+| `release.json` | The same facts as JSON, which is what the website reads. |
+
+The version is in the release tag, in the file's Windows version resource, and
+in `release.json` — not in the filename, because a filename that changes every
+release cannot be linked to.
 
 Per-user install. No administrator rights, no service, no scheduled task, and it
 does not start with Windows. Uninstalling offers to restore every tool's
@@ -72,7 +86,7 @@ original settings first.
 **Verify what you downloaded** before running it:
 
 ```
-certutil -hashfile USAGE-Miner-<version>-Setup.exe SHA256
+certutil -hashfile USAGE-Miner-Windows-x64-Setup.exe SHA256
 ```
 
 Compare against `SHA256SUMS.txt` in the same release.
