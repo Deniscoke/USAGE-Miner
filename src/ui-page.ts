@@ -44,6 +44,20 @@ export function renderApp(nonce: string): string {
     margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif;
   }
+  .setup { border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:12px; background:var(--card); }
+  .setup h2 { margin:0 0 2px; }
+  .setup .lead { color:var(--dim); font-size:12px; margin:0 0 12px; }
+  .step { display:grid; grid-template-columns:22px 1fr auto; gap:10px; align-items:start; padding:10px 0; border-top:1px solid var(--line); }
+  .step:first-of-type { border-top:0; }
+  .step .mark { font:600 12px/20px ui-monospace, monospace; text-align:center; border-radius:50%; width:20px; height:20px; }
+  .step .mark.done { color:var(--ok); }
+  .step .mark.now { background:var(--fg); color:var(--card); }
+  .step .mark.later { color:var(--dim); }
+  .step .title { font-size:13px; }
+  .step .why { color:var(--dim); font-size:12px; margin-top:2px; line-height:1.45; }
+  .step.is-done .title, .step.is-done .why { color:var(--dim); }
+  .step code { display:block; margin-top:6px; padding:6px 8px; border:1px solid var(--line); border-radius:4px; font-size:12px; overflow-x:auto; }
+
   .wrap { max-width: 620px; margin: 0 auto; padding: 32px 20px 56px; }
   h1 { font-size: 22px; font-weight: 500; letter-spacing: -0.01em; margin: 0; }
   .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
@@ -163,6 +177,56 @@ export function renderApp(nonce: string): string {
     fn().catch(function () {}).then(function () { busy = false; refresh(); });
   }
 
+  function setupCard(state) {
+    var card = el("div", "setup");
+    card.appendChild(el("h2", null, "Three things, then you are mining"));
+    card.appendChild(el("p", "lead", "USAGE needs all three. It cannot reward compute it did not carry, cannot price, or cannot prove was paid for."));
+
+    state.setup.steps.forEach(function (step, index) {
+      var row = el("div", "step" + (step.done ? " is-done" : ""));
+      var state_ = step.done ? "done" : index === state.setup.nextIndex ? "now" : "later";
+      row.appendChild(el("span", "mark " + state_, step.done ? "✓" : String(index + 1)));
+
+      var mid = el("div");
+      mid.appendChild(el("div", "title", step.title));
+      mid.appendChild(el("div", "why", step.detail));
+      if (step.action && step.action.kind === "command") {
+        mid.appendChild(el("code", null, step.action.command));
+      }
+      row.appendChild(mid);
+
+      var right = el("div", "actions");
+      if (step.action && step.action.kind === "sign_in") {
+        var signIn = el("button", "primary", step.action.label);
+        signIn.onclick = function () { act(function () { return api("/sign-in", {}); }); };
+        right.appendChild(signIn);
+      } else if (step.action && step.action.kind === "open") {
+        var open = el("button", "primary", step.action.label);
+        open.onclick = function () {
+          act(function () { return api("/open", { target: step.action.target }); });
+        };
+        right.appendChild(open);
+      } else if (step.action && step.action.kind === "command") {
+        var copy = el("button", null, step.action.label);
+        copy.onclick = function () {
+          try {
+            navigator.clipboard.writeText(step.action.command);
+            copy.textContent = "Copied";
+            setTimeout(function () { copy.textContent = step.action.label; }, 2000);
+          } catch (e) {
+            // Clipboard can be refused; the command is on screen either way.
+            copy.textContent = "Select it above";
+          }
+        };
+        right.appendChild(copy);
+      }
+      row.appendChild(right);
+      card.appendChild(row);
+    });
+
+    return card;
+  }
+
   function render(state) {
     app.textContent = "";
 
@@ -200,6 +264,8 @@ export function renderApp(nonce: string): string {
     // ------------------------------------------------------------ WHO / WHERE
     // The account is a person; this PC is a device. Two lines, never one.
     var acct = el("div", "card");
+    if (state.setup && !state.setup.complete) app.appendChild(setupCard(state));
+
     acct.appendChild(el("h2", null, "Account"));
     var acctRow = el("div", "row");
     acctRow.appendChild(el("div", "name", state.accountDisplay || "USAGE account"));

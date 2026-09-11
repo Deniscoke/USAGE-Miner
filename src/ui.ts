@@ -10,6 +10,7 @@ import { codexAdapter } from "./tools/codex.js";
 import { geminiCliAdapter } from "./tools/gemini-cli.js";
 import { cursorAdapter } from "./tools/cursor.js";
 import { reconcileMappings, setMapped } from "./mappings.js";
+import { buildSetup, type Setup } from "./setup.js";
 import { installationId } from "./installation.js";
 import { isSessionAlive, loadTelemetryStatus, SYNC_COPY, type ToolTelemetryStatus } from "./telemetry/status.js";
 import { fetchDeviceUsage, setMapping, type DeviceUsageSummary } from "./api.js";
@@ -109,6 +110,12 @@ export interface AppState {
   route: AiRoute | null;
   /** One sentence answering "why am I not earning?", or null when earning. */
   whyNotEarning: string | null;
+  /**
+   * What is still missing before this PC can mine, in order. Null while the
+   * window has not learned enough to say -- never an empty list, which would
+   * read as "nothing left to do".
+   */
+  setup: Setup | null;
   providers: { label: string; miningLabel: string }[];
   tools: ToolView[];
   pairing: { userCode: string; verificationUrl: string } | null;
@@ -246,6 +253,7 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     network: null,
     networkLabel: null,
     route: null,
+    setup: null,
     whyNotEarning: null,
     providers: [],
     tools: [],
@@ -320,6 +328,16 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     label: route.label,
     miningLabel: route.miningLabel,
   }));
+
+  // The eligibility is the SERVER's verdict for the route it chose, never this
+  // window's own reading of a connection list.
+  state.setup = buildSetup({
+    signedIn: true,
+    eligibleProvider: state.route?.kind === "provider" && state.route.rewardStatus === "eligible",
+    anyProvider: config.routes.length > 0,
+    meterableToolInstalled: state.tools.some((tool) => tool.installed && tool.meterable),
+    unmeterableInstalled: state.tools.filter((tool) => tool.installed && !tool.meterable).map((tool) => tool.name),
+  });
   state.updateAvailable = config.updateRequired;
 
   if (Date.now() - lastHeartbeatAt > HEARTBEAT_INTERVAL_MS) {
@@ -718,7 +736,11 @@ export async function startDesktop(): Promise<DesktopHandle> {
           dashboard: "/dashboard",
           providers: "/providers/add",
           miners: "/miners",
-          privacy: "/miners/install",
+          privacy: "/download",
+          // Straight into connecting OpenRouter. Until this existed the window
+          // said "no eligible provider connected" and left people to find
+          // "Add provider" on a website they had never seen.
+          connect_provider: "/api/providers/oauth/openrouter/start",
         };
         const path = targets[String(body.target)];
         if (!path) return json(response, { error: "unknown_target" }, 400);
