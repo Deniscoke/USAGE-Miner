@@ -501,7 +501,16 @@ describe("the offline buffer holds metadata only", () => {
     const { enqueue, pending, acknowledge, BUFFER_LIMITS } = await import("./buffer.js");
     const base = normalizeRecords(flattenOtlpLogs(claudeApiRequest()), CLAUDE_CODE_MAPPING, { toolVersion: null, localSessionId: "s" })[0];
     const stale = { ...base, localEventId: "old", occurredAt: new Date(Date.now() - BUFFER_LIMITS.maxAgeMs - 1000).toISOString() };
-    const smuggled = { ...base, localEventId: "new", prompt: SENSITIVE.prompt } as unknown as LocalUsageObservation;
+    // Fresh RELATIVE to now, not to the fixture. The fixture is dated
+    // 2026-09-08T16:06:32Z, so 72 hours later this test began failing on its
+    // own: both records counted as expired and the buffer was empty. A test
+    // about age must set its own ages.
+    const smuggled = {
+      ...base,
+      localEventId: "new",
+      occurredAt: new Date().toISOString(),
+      prompt: SENSITIVE.prompt,
+    } as unknown as LocalUsageObservation;
 
     await enqueue([stale, smuggled]);
     const waiting = await pending();

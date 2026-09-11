@@ -1,6 +1,6 @@
 {
   "name": "usage-miner",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Routes the AI tools already on your Windows PC through USAGE, so their compute can be verified. Run it with npx and there is no installer to trust.",
   "type": "module",
   "bin": {

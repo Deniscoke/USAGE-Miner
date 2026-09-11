@@ -22,7 +22,46 @@ export class ApiError extends Error {
   }
 }
 
-export const REQUEST_TIMEOUT_MS = 8_000;
+/**
+ * How long USAGE gets to answer.
+ *
+ * Was 8 seconds, which measured as too tight in practice: the configuration
+ * call does several database reads behind a serverless function, and timings
+ * on a normal connection land between 3 and 6 seconds, with cold starts above
+ * that. Users were told "Check your connection" while their connection was
+ * perfectly fine.
+ *
+ * 20 seconds. Still bounded, because a call that never answers must not become
+ * a window that never renders, but no longer a coin toss on a slow morning.
+ */
+export const REQUEST_TIMEOUT_MS = 20_000;
+
+/** A network failure a person can act on, without leaking a credential. */
+export function describeNetworkFailure(error: unknown, serverUrl: string): string {
+  let host = serverUrl;
+  try {
+    host = new URL(serverUrl).host;
+  } catch {
+    // A malformed server URL is itself worth showing verbatim.
+  }
+
+  const named = error as { name?: string; cause?: { code?: string } };
+  const code = named?.cause?.code ?? "";
+
+  if (named?.name === "TimeoutError" || named?.name === "AbortError") {
+    return `USAGE (${host}) did not answer within ${Math.round(REQUEST_TIMEOUT_MS / 1000)} seconds. It may be busy — try again.`;
+  }
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
+    return `Could not find ${host}. Check your internet connection or DNS.`;
+  }
+  if (code === "ECONNREFUSED") {
+    return `${host} refused the connection. If this is a self-hosted USAGE, check that it is running.`;
+  }
+  if (code.startsWith("CERT_") || code === "SELF_SIGNED_CERT_IN_CHAIN" || code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE") {
+    return `The certificate for ${host} could not be verified (${code}). A proxy or antivirus may be inspecting HTTPS traffic.`;
+  }
+  return `Could not reach USAGE (${host})${code ? ` — ${code}` : ""}. Check your connection and try again.`;
+}
 
 async function request<T>(
   serverUrl: string,
@@ -45,8 +84,12 @@ async function request<T>(
       headers,
       signal: rest.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-  } catch {
-    throw new ApiError(0, "unreachable", "Could not reach USAGE. Check your connection.");
+  } catch (error) {
+    // Say what actually happened. "Check your connection" sent people to
+    // restart their router when the truth was a slow server, an expired
+    // certificate or a typo in a self-hosted URL, and each of those has a
+    // different fix.
+    throw new ApiError(0, "unreachable", describeNetworkFailure(error, serverUrl));
   }
 
   if (!response.ok) {
