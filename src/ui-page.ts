@@ -514,6 +514,51 @@ export function renderApp(nonce: string): string {
       "Nothing is written to the app's settings and nothing is read from your files."));
     app.appendChild(tools);
 
+    // ------------------------------------------------------------ CLAUDE CODE EVERYWHERE
+    // Claude Code started from a terminal or VS Code, not from this window.
+    // Opt-in, because it writes into Claude Code's own settings file.
+    var claudeTool = state.tools.filter(function (t) { return t.id === "claude-code"; })[0];
+    if (state.signedIn && state.alwaysOn && claudeTool && claudeTool.installed) {
+      var ao = state.alwaysOn;
+      var everywhere = el("div", "card");
+      var aoHead = el("div", "row");
+      aoHead.appendChild(el("h2", null, "Measure Claude Code everywhere"));
+      var aoTag = !ao.enabled ? ["off", "OFF"]
+        : ao.listening === "listening" ? ["on", "ON"]
+        : ao.listening === "port_in_use" ? ["warn", "PORT " + 47823 + " BUSY"]
+        : ["warn", "STARTING"];
+      aoHead.appendChild(el("span", "tag " + aoTag[0], aoTag[1]));
+      everywhere.appendChild(aoHead);
+      everywhere.appendChild(el("div", "note",
+        "Counts Claude Code however you start it: a terminal, a shortcut or the VS Code extension, " +
+        "while this window is running. It adds telemetry settings to Claude Code's settings.json: " +
+        "no password, no key, and prompts and replies stay switched off. Turning it off removes exactly those settings."));
+      everywhere.appendChild(el("div", "note",
+        "This measures usage; it does not earn. Earning still needs Start with USAGE, because only a request " +
+        "USAGE routes can be verified."));
+      if (ao.enabled && ao.listening === "port_in_use") {
+        everywhere.appendChild(el("div", "err",
+          "Another program is using port 47823, so nothing is being received. Close it, or turn this off."));
+      }
+      if (ao.enabled && ao.eventsSinceStart > 0) {
+        everywhere.appendChild(el("div", "meta",
+          ao.eventsSinceStart + " Claude Code request" + (ao.eventsSinceStart === 1 ? "" : "s") + " measured since the miner started" +
+          (ao.lastEventAt ? " · last " + fmtTime(ao.lastEventAt) : "")));
+      }
+      var aoButton = el("button", ao.enabled ? "" : "primary", ao.enabled ? "Turn off" : "Turn on");
+      aoButton.style.marginTop = "10px";
+      aoButton.onclick = function () {
+        act(function () {
+          return api("/always-on", { enabled: !ao.enabled }).then(function (r) {
+            if (r && r.error) window.alert(r.message || "Could not change it.");
+            else if (r && r.warning) window.alert(r.warning);
+          });
+        });
+      };
+      everywhere.appendChild(aoButton);
+      app.appendChild(everywhere);
+    }
+
     // ------------------------------------------------------------ PRIVACY
     var privacy = el("div", "card");
     privacy.appendChild(el("h2", null, "Exactly what USAGE reads"));

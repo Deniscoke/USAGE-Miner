@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 import { hostname, platform, release } from "node:os";
 import { fetchConfig, pollPairing, sendHeartbeat, startPairing, type MinerConfig } from "./api.js";
 import { startBackgroundLoop } from "./background.js";
+import { createAlwaysOnService, type AlwaysOnListening } from "./telemetry/always-on-service.js";
+import { alwaysOnStatus, disableAlwaysOn, enableAlwaysOn } from "./telemetry/always-on.js";
 import { pending } from "./telemetry/buffer.js";
 import { createUploader } from "./telemetry/uploader.js";
 import { loadDeviceKey } from "./device-key.js";
@@ -131,7 +133,12 @@ export interface AppState {
   securityNotice: string | null;
   /** Today's figures, as the SERVER computed them. Null when signed out or offline. */
   usage: DeviceUsageSummary | null;
+  /** "Measure Claude Code everywhere": the switch, and whether its receiver is up. */
+  alwaysOn: { enabled: boolean; listening: AlwaysOnListening; eventsSinceStart: number; lastEventAt: string | null };
 }
+
+/** Set by startDesktop; null in the CLI and in tests that build state directly. */
+let alwaysOnService: ReturnType<typeof createAlwaysOnService> | null = null;
 
 /** How long one adapter may take to say whether its tool is installed. */
 // Generous for a cold start on a slow disk (three shells spawn in parallel);
@@ -269,6 +276,10 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
     updateAvailable: false,
     securityNotice,
     usage: null,
+    alwaysOn: {
+      enabled: (await alwaysOnStatus().catch(() => ({ enabled: false }))).enabled,
+      ...(alwaysOnService?.state() ?? { listening: "off" as const, eventsSinceStart: 0, lastEventAt: null }),
+    },
   };
 
   let credential: StoredCredential | null = null;
@@ -736,6 +747,42 @@ export async function startDesktop(): Promise<DesktopHandle> {
         return;
       }
 
+      /**
+       * Turn "measure Claude Code everywhere" on or off.
+       *
+       * On writes telemetry settings (never a credential) into Claude Code's
+       * settings.json and turns the device's Claude Code mapping on, because
+       * USAGE refuses telemetry from a tool the device has not opted in. Off
+       * removes exactly what was written. The mapping is left as it is on the
+       * way off: launched sessions may still want it.
+       */
+      if (url.pathname === "/always-on" && request.method === "POST") {
+        const body = await readBody(request);
+        const enabled = body.enabled === true;
+        const credential = await loadCredential();
+        if (enabled && !credential) return json(response, { error: "not_signed_in" }, 401);
+
+        const result = enabled ? await enableAlwaysOn({ force: body.force === true }) : await disableAlwaysOn();
+        if (!result.ok) return json(response, { error: result.reason, message: result.message }, 409);
+
+        if (enabled && credential) {
+          const detection = await claudeCodeAdapter.detect();
+          try {
+            await setMapping(credential.serverUrl, credential.token, "claude-code", true, detection.version);
+            await setMapped(credential.deviceId, "claude-code", true);
+            invalidateConfigCache();
+          } catch (error) {
+            // The settings are written; say that the opt-in did not reach USAGE.
+            await alwaysOnService?.refresh().catch(() => undefined);
+            return json(response, { ok: true, warning: `Measuring is on, but USAGE did not record the opt-in: ${(error as Error).message}` });
+          }
+        }
+        await alwaysOnService?.refresh().catch(() => undefined);
+        await logEvent({ event: enabled ? "always_on_enable" : "always_on_disable", tool: "claude-code", outcome: "ok" });
+        json(response, { ok: true, message: result.message });
+        return;
+      }
+
       if (url.pathname === "/disable" && request.method === "POST") {
         const body = await readBody(request);
         const adapter = ADAPTERS.find((entry) => entry.id === body.tool);
@@ -803,6 +850,12 @@ export async function startDesktop(): Promise<DesktopHandle> {
   // USAGE is reachable again instead of waiting for the next launched session.
   const background = startBackgroundLoop({ tick: backgroundTick });
   server.on("close", () => background.stop());
+
+  // The receiver "measure Claude Code everywhere" points Claude Code at. Only
+  // started when that switch is on; see telemetry/always-on.ts.
+  alwaysOnService = createAlwaysOnService({ loadCredential, loadDeviceKey });
+  await alwaysOnService.refresh().catch(() => undefined);
+  server.on("close", () => void alwaysOnService?.stop());
   const appUrl = `http://127.0.0.1:${port}/?k=${nonce}`;
 
   process.stdout.write(`USAGE Miner ${VERSION}\nOpening ${appUrl}\n`);

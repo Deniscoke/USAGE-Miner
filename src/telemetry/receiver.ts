@@ -77,6 +77,24 @@ function bearerMatches(header: string | undefined, secret: string): boolean {
   return presented.length === expected.length && timingSafeEqual(presented, expected);
 }
 
+function keyMatches(header: string | string[] | undefined, key: string): boolean {
+  if (typeof header !== "string") return false;
+  const presented = Buffer.from(header.trim());
+  const expected = Buffer.from(key);
+  return presented.length === expected.length && timingSafeEqual(presented, expected);
+}
+
+export interface ReceiverOptions {
+  /** A fixed loopback port. Default: one the operating system picks. */
+  port?: number;
+  /**
+   * The always-on receiver: authenticated by a key Claude Code sends in the
+   * X-Usage-Miner header (from its settings file) instead of a per-session
+   * bearer secret. See telemetry/always-on.ts for what that key is and is not.
+   */
+  headerKey?: string;
+}
+
 /**
  * Start a receiver for one session.
  *
@@ -85,6 +103,7 @@ function bearerMatches(header: string | undefined, secret: string): boolean {
  */
 export async function startTelemetryReceiver(
   onRecords: (records: FlatLogRecord[]) => void,
+  options: ReceiverOptions = {},
 ): Promise<TelemetryReceiver> {
   const sessionSecret = randomBytes(32).toString("base64url");
   const stats = { accepted: 0, rejected: 0, recordsSeen: 0 };
@@ -108,9 +127,21 @@ export async function startTelemetryReceiver(
       return;
     }
 
+    // A browser always says where a request came from; Claude Code never does.
+    // Refusing anything with an Origin keeps every web page off this port,
+    // whatever it guesses about the key.
+    if (request.headers.origin !== undefined) {
+      stats.rejected += 1;
+      response.writeHead(403).end();
+      return;
+    }
+
     // Authentication before reading a body: an unauthenticated sender does not
     // get to make the miner buffer a megabyte.
-    if (!bearerMatches(request.headers.authorization, sessionSecret)) {
+    const authenticated = options.headerKey
+      ? keyMatches(request.headers["x-usage-miner"], options.headerKey)
+      : bearerMatches(request.headers.authorization, sessionSecret);
+    if (!authenticated) {
       stats.rejected += 1;
       response.writeHead(401).end();
       return;
@@ -164,7 +195,14 @@ export async function startTelemetryReceiver(
 
   // Loopback only. Not 0.0.0.0, not the machine's LAN address, not "localhost"
   // (which may resolve to an IPv6 address a tool then cannot reach).
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve, reject) => {
+    // A fixed port can be taken. Say so to the caller rather than crash.
+    server.once("error", reject);
+    server.listen(options.port ?? 0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
   const port = (server.address() as { port: number }).port;
 
   return {

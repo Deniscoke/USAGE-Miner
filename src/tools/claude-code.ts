@@ -173,6 +173,13 @@ export const claudeCodeAdapter: LocalToolAdapter = {
         OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
         OTEL_EXPORTER_OTLP_ENDPOINT: receiver.endpoint,
         OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${receiver.sessionSecret}`,
+        // The per-signal names too. "Measure Claude Code everywhere" writes
+        // these into settings.json, and a per-signal setting outranks a generic
+        // one; stating them here keeps a launched session's settings complete
+        // and consistent whichever source Claude Code applies.
+        OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json",
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `${receiver.endpoint}/v1/logs`,
+        OTEL_EXPORTER_OTLP_LOGS_HEADERS: `Authorization=Bearer ${receiver.sessionSecret}`,
         OTEL_LOGS_EXPORT_INTERVAL: "2000",
         OTEL_LOG_USER_PROMPTS: "0",
         OTEL_LOG_TOOL_DETAILS: "0",
