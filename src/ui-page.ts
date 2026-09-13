@@ -295,6 +295,7 @@ export function renderApp(nonce: string): string {
     // (what it is estimated to earn). And the reason when the last is zero.
     var anyTracking = state.tools.some(function (t) { return t.mapped && t.tracking && t.tracking.active; });
     var anyMapped = state.tools.some(function (t) { return t.mapped; });
+    var pendingBalanceCard = null;
     var today = el("div", "card");
     var todayHead = el("div", "row");
     todayHead.appendChild(el("h2", null, "Today on this PC"));
@@ -327,7 +328,7 @@ export function renderApp(nonce: string): string {
       [
         ["Verified by USAGE", vb.requestCount + " req · " + fmtTokens(state.usage.verifiedTokens) + " fresh", "trusted records only"],
         ["Eligible", fmtMicros(state.usage.eligibleComputeMicros), "allowed to earn · versioned pricing, not token counts"],
-        ["USAGE", state.usage.estimatedPoints ? "+" + state.usage.estimatedPoints : "—", "credited when the day settles, just after midnight UTC"]
+        ["USAGE today", state.usage.estimatedPoints ? "~" + fmtPoints(state.usage.estimatedPoints) : "—", "estimate · credited when the day settles, just after midnight UTC"]
       ].forEach(function (cell) {
         var c = el("div", "cell");
         c.appendChild(el("div", "cell-label", cell[0]));
@@ -336,6 +337,22 @@ export function renderApp(nonce: string): string {
         grid2.appendChild(c);
       });
       today.appendChild(grid2);
+      // The day resets at midnight UTC, so the morning's panel is empty by design.
+      // Say where the rest of the account is rather than leave a person guessing.
+      today.appendChild(el("div", "note",
+        "This panel counts AI apps on this PC for today (UTC) only. Chat on the USAGE website counts too, on your dashboard."));
+      if (typeof state.usage.balancePoints === "number") {
+        var bal = el("div", "card");
+        var balHead = el("div", "row");
+        balHead.appendChild(el("h2", null, "USAGE Points"));
+        balHead.appendChild(el("span", "cell-value tnum", fmtPoints(state.usage.balancePoints)));
+        bal.appendChild(balHead);
+        var lc = state.usage.lastCredit;
+        bal.appendChild(el("div", "note", lc
+          ? "Last settled day " + lc.day + ": +" + fmtPoints(lc.points) + ". Points stay on your account; they cannot be sent, sold or exchanged."
+          : "Nothing settled yet. Points are credited the morning after a day you mine."));
+        pendingBalanceCard = bal;
+      }
       if (state.usage.recent && state.usage.recent.length) {
         var feed = el("div", "feed");
         state.usage.recent.slice(0, 6).forEach(function (r) {
@@ -366,6 +383,7 @@ export function renderApp(nonce: string): string {
       today.appendChild(why);
     }
     app.appendChild(today);
+    if (pendingBalanceCard) app.appendChild(pendingBalanceCard);
 
     // ------------------------------------------------------------ AI ROUTE
     // What actually carries Claude Code's requests when started from here.
@@ -526,6 +544,11 @@ export function renderApp(nonce: string): string {
       return d.getHours() + ":" + (d.getMinutes() < 10 ? "0" : "") + d.getMinutes();
     } catch (e) { return ""; }
   }
+  function fmtPoints(n) {
+    var v = Number(n);
+    return isFinite(v) ? Math.round(v).toLocaleString("en-US") : "—";
+  }
+
   function fmtMicros(m) {
     m = Number(m || 0);
     return "$" + (m / 1e6).toFixed(m >= 1e6 ? 2 : 4) + " equiv.";

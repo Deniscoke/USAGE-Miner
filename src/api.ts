@@ -366,7 +366,12 @@ export interface DeviceUsageSummary {
   tracked?: UsageBreakdown;
   verified?: UsageBreakdown;
   eligibleComputeMicros: number;
-  estimatedPoints: string | null;
+  /** Today's open-epoch estimate. The server sends a number; older servers sent null. */
+  estimatedPoints: number | string | null;
+  /** Settled USAGE Points on the account. Absent from older servers. */
+  balancePoints?: number;
+  /** The most recent settled day and what it paid. Absent from older servers. */
+  lastCredit?: { day: string; points: number; creditedAt: string } | null;
   recent: { tool: string; model?: string | null; tokens: number; breakdown?: UsageBreakdown; status: "tracked" | "verified" | "routed"; at: string }[];
 }
 
