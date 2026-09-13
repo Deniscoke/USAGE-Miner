@@ -92,6 +92,12 @@ export const CODEX_MAPPING: TelemetryMapping = {
   provider: "openai",
   eventNames: ["codex.sse_event", "sse_event"],
   accept: (attributes) => attributes["event.kind"] === "response.completed",
+  // Codex's input count is the whole prompt, cached part included: codex-rs
+  // keeps `cached_input_tokens` as a subset of `input_tokens` (its own
+  // non-cached figure is the difference), and on the 0.153.3 wire
+  // `tool_token_count` equals input + output with no cache term added. Claude
+  // Code's input count excludes cache reads, so it does not set this.
+  inputIncludesCacheRead: true,
   fields: {
     // A shared attribute on every Codex event (codex-rs/otel/src/events/shared.rs),
     // confirmed on the wire from 0.153.3. `user.email` and `user.account_id`

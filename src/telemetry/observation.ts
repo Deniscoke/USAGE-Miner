@@ -102,6 +102,17 @@ export interface TelemetryMapping {
   eventNames: readonly string[];
   /** Further filter on attributes, e.g. Codex only on `event.kind = response.completed`. */
   accept?: (attributes: Record<string, ScalarAttribute>) => boolean;
+  /**
+   * The tool's input count already INCLUDES the cache-read tokens.
+   *
+   * The schema's `inputTokens` means fresh input: tokens newly read, with cache
+   * reads counted separately in `cacheReadTokens`. Anthropic reports it that
+   * way. OpenAI-style usage does not: `input_tokens` is the whole prompt and
+   * `cached_tokens` is a part of it. Copying that number straight across
+   * counted every cached token twice -- once as fresh input, once as a cache
+   * read -- and a mostly-cached Codex session looked many times its size.
+   */
+  inputIncludesCacheRead?: boolean;
   fields: {
     model?: string;
     upstreamRequestId?: string;
@@ -169,7 +180,15 @@ export function normalizeRecords(
     if (mapping.accept && !mapping.accept(attributes)) continue;
 
     const read = (key: string | undefined) => (key ? attributes[key] : undefined);
-    const inputTokens = integer(read(mapping.fields.inputTokens));
+    const reportedInput = integer(read(mapping.fields.inputTokens));
+    const cacheReadTokens = integer(read(mapping.fields.cacheReadTokens));
+    // Fresh input only; see TelemetryMapping.inputIncludesCacheRead. Floored at
+    // zero, because a tool that reports more cached than total is wrong, and a
+    // negative token count would be a worse kind of wrong.
+    const inputTokens =
+      mapping.inputIncludesCacheRead && reportedInput !== null && cacheReadTokens !== null
+        ? Math.max(0, reportedInput - cacheReadTokens)
+        : reportedInput;
     const outputTokens = integer(read(mapping.fields.outputTokens));
     if (inputTokens === null && outputTokens === null) continue;
 
@@ -187,7 +206,7 @@ export function normalizeRecords(
       upstreamRequestId: text(read(mapping.fields.upstreamRequestId), 200),
       inputTokens,
       outputTokens,
-      cacheReadTokens: integer(read(mapping.fields.cacheReadTokens)),
+      cacheReadTokens,
       cacheWriteTokens: integer(read(mapping.fields.cacheWriteTokens)),
       reasoningTokens: integer(read(mapping.fields.reasoningTokens)),
       toolTokens: integer(read(mapping.fields.toolTokens)),

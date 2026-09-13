@@ -318,7 +318,10 @@ describe("Codex normalization -- truthful about what is not there", () => {
     expect(observations).toHaveLength(1);
     expect(observations[0].model).toBe("gpt-6-astra");
     expect(observations[0].upstreamRequestId).toBeNull();
-    expect(observations[0].inputTokens).toBe(900);
+    // 900 on the wire is the whole prompt, 300 of it cached: fresh input is
+    // 600 and the 300 are a cache read, never both.
+    expect(observations[0].inputTokens).toBe(600);
+    expect(observations[0].cacheReadTokens).toBe(300);
     expect(observations[0].reasoningTokens).toBe(50);
     // tool_token_count is a total on the wire; it must not be read as tool tokens.
     expect(observations[0].toolTokens).toBeNull();
@@ -533,5 +536,34 @@ describe("stripToSchema", () => {
     const out = stripToSchema({ tool: "x", prompt: "p", proof_status: "confirmed", schema: "evil" });
     expect(Object.keys(out)).toEqual(["schema", "tool"]);
     expect(out.schema).toBe(LOCAL_OBSERVATION_SCHEMA);
+  });
+});
+
+describe("input counts that already include the cache", () => {
+  const flat = (attrs: Record<string, string | number>) =>
+    flattenOtlpLogs(envelope([{ attributes: Object.entries(attrs).map(([k, v]) => attr(k, v)) }]));
+
+  it("never lets fresh input go negative when a tool reports more cached than total", () => {
+    const [o] = normalizeRecords(
+      flat({ "event.name": "codex.sse_event", "event.kind": "response.completed", input_token_count: 100, cached_token_count: 250, output_token_count: 5 }),
+      CODEX_MAPPING,
+      { toolVersion: null, localSessionId: "s" },
+    );
+    expect(o.inputTokens).toBe(0);
+  });
+
+  it("keeps the reported input when there is no cache figure to subtract", () => {
+    const [o] = normalizeRecords(
+      flat({ "event.name": "codex.sse_event", "event.kind": "response.completed", input_token_count: 100, output_token_count: 5 }),
+      CODEX_MAPPING,
+      { toolVersion: null, localSessionId: "s" },
+    );
+    expect(o.inputTokens).toBe(100);
+  });
+
+  it("leaves Claude Code alone, whose input already excludes cache reads", () => {
+    const [o] = normalizeRecords(flattenOtlpLogs(claudeApiRequest()), CLAUDE_CODE_MAPPING, { toolVersion: null, localSessionId: "s" });
+    expect(o.inputTokens).toBe(1500);
+    expect(o.cacheReadTokens).toBe(800);
   });
 });
