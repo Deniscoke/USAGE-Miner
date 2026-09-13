@@ -34,6 +34,7 @@ import { isMapped, setMapped } from "./mappings.js";
 import { loadDeviceKey } from "./device-key.js";
 import { startMeteringSession } from "./telemetry/session.js";
 import { setMapping, registerDeviceKey } from "./api.js";
+import { startBackgroundLoop } from "./background.js";
 import { platform as osPlatform, release as osRelease } from "node:os";
 
 /**
@@ -527,6 +528,21 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
 
   const child = spawn(plan.command, [...extraArgs, ...args], { stdio: "inherit", env, shell: true });
 
+  // A launched session keeps the device visibly online for as long as the tool
+  // runs. It used to send no heartbeat at all, so a PC mining for hours from a
+  // console showed OFFLINE on the dashboard unless the window was also open.
+  const presence = startBackgroundLoop({
+    tick: async () => {
+      await sendHeartbeat(
+        credential.serverUrl,
+        credential.token,
+        [{ tool: adapter.id, version: detection.version ?? null, detected: detection.installed, mapped }],
+        `${osPlatform()} ${osRelease()}`,
+        VERSION,
+      );
+    },
+  });
+
   // Drop this process's own references once the child holds its copy. It does
   // not scrub the string from the heap -- V8 offers no such guarantee, and
   // pretending otherwise would be theatre -- but nothing here keeps it alive
@@ -534,6 +550,7 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
   for (const key of Object.keys(plan.env)) delete plan.env[key];
 
   child.on("exit", async (code) => {
+    presence.stop();
     if (session) {
       const summary = await session.end();
       out("");

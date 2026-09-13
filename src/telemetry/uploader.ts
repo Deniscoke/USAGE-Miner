@@ -62,13 +62,51 @@ export interface UploadOutcome {
 /** Retry schedule when the server is unreachable. Seconds. */
 const BACKOFF_STEPS = [5, 15, 60, 300];
 
+/**
+ * Observations per request.
+ *
+ * The server accepts at most 200 per batch and 256 KB per body. The uploader
+ * used to send the whole buffer in one request -- up to 2,000 after an offline
+ * stretch -- which the server refused, which put them all back in the buffer,
+ * which made the next attempt identical. After any outage longer than a couple
+ * of hundred requests, syncing stopped for good and the window called it a
+ * network problem. A hundred at a time leaves room for signatures under both
+ * limits.
+ */
+export const MAX_UPLOAD_BATCH = 100;
+
+/** The server looked at this and will never accept it, however often it is sent. */
+function isPermanentRejection(status: number | null): boolean {
+  return status === 400 || status === 413 || status === 422;
+}
+
+function chunks<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+function addResults(total: TelemetryUploadResult | null, next: TelemetryUploadResult): TelemetryUploadResult {
+  if (!total) return { ...next };
+  return {
+    accepted: total.accepted + next.accepted,
+    duplicate: total.duplicate + next.duplicate,
+    rejected: total.rejected + next.rejected,
+    verdicts: { ...(total.verdicts ?? {}), ...(next.verdicts ?? {}) },
+    reasons: { ...(total.reasons ?? {}), ...(next.reasons ?? {}) },
+  };
+}
+
 export function createUploader(input: {
   serverUrl: string;
   token: string;
   key: DeviceKey;
   now?: () => number;
+  /** Test seam; defaults to the real API call. */
+  upload?: typeof uploadTelemetry;
 }) {
   const now = input.now ?? (() => Date.now());
+  const upload = input.upload ?? uploadTelemetry;
   let failures = 0;
   let notBefore = 0;
 
@@ -80,35 +118,65 @@ export function createUploader(input: {
       return { uploaded: 0, buffered, result: null };
     }
 
-    try {
-      const result = await uploadTelemetry(
-        input.serverUrl,
-        input.token,
-        signObservations(observations, input.key),
-      );
-      failures = 0;
-      notBefore = 0;
-      await acknowledge(observations.map((o) => o.localEventId));
-      await logEvent({
-        event: "telemetry_upload",
-        outcome: "ok",
-        detail: `accepted=${result.accepted} duplicate=${result.duplicate} rejected=${result.rejected}`,
-      });
-      return { uploaded: observations.length, buffered: 0, result };
-    } catch (error) {
-      failures += 1;
-      const step = BACKOFF_STEPS[Math.min(failures, BACKOFF_STEPS.length) - 1];
-      notBefore = now() + step * 1000;
-      const buffered = await enqueue(observations, now());
-      const code = (error as { code?: string }).code ?? null;
-      const status = (error as { status?: number }).status ?? null;
-      await logEvent({
-        event: "telemetry_upload",
-        outcome: "unreachable",
-        detail: `buffered=${buffered} retry_in=${step}s reason=${code ?? (error as Error).name}`,
-      });
-      return { uploaded: 0, buffered, result: null, errorCode: code, errorStatus: status };
+    const queue = chunks(observations, MAX_UPLOAD_BATCH);
+    let uploaded = 0;
+    let dropped = 0;
+    let total: TelemetryUploadResult | null = null;
+
+    for (let i = 0; i < queue.length; i += 1) {
+      const batch = queue[i]!;
+      try {
+        const result = await upload(input.serverUrl, input.token, signObservations(batch, input.key));
+        await acknowledge(batch.map((o) => o.localEventId));
+        uploaded += batch.length;
+        total = addResults(total, result);
+      } catch (error) {
+        const code = (error as { code?: string }).code ?? null;
+        const status = (error as { status?: number }).status ?? null;
+
+        if (isPermanentRejection(status)) {
+          // One bad observation must not hold back the good ones around it.
+          // Halve the batch until the refusal is pinned to a single item,
+          // then drop that one item: the server will never take it, and
+          // keeping it would block everything queued behind it forever.
+          if (batch.length > 1) {
+            const half = Math.ceil(batch.length / 2);
+            queue.splice(i + 1, 0, batch.slice(0, half), batch.slice(half));
+            continue;
+          }
+          await acknowledge([batch[0]!.localEventId]);
+          dropped += 1;
+          await logEvent({
+            event: "telemetry_upload",
+            outcome: "error",
+            detail: `rejected_permanently status=${status} reason=${code ?? "unknown"}`,
+          });
+          continue;
+        }
+
+        // Unreachable, rate limited, server error, or this device is no longer
+        // allowed: keep this batch and everything after it, and back off.
+        failures += 1;
+        const step = BACKOFF_STEPS[Math.min(failures, BACKOFF_STEPS.length) - 1]!;
+        notBefore = now() + step * 1000;
+        const buffered = await enqueue(queue.slice(i).flat(), now());
+        await logEvent({
+          event: "telemetry_upload",
+          outcome: status === 401 || status === 403 ? "unauthenticated" : status === 429 ? "rate_limited" : "unreachable",
+          detail: `uploaded=${uploaded} buffered=${buffered} retry_in=${step}s reason=${code ?? (error as Error).name}`,
+        });
+        return { uploaded, buffered, result: null, errorCode: code, errorStatus: status };
+      }
     }
+
+    failures = 0;
+    notBefore = 0;
+    await logEvent({
+      event: "telemetry_upload",
+      outcome: "ok",
+      detail: `batches=${queue.length} accepted=${total?.accepted ?? 0} duplicate=${total?.duplicate ?? 0} rejected=${total?.rejected ?? 0} dropped=${dropped}`,
+    });
+    return { uploaded, buffered: 0, result: total };
   }
 
   return {

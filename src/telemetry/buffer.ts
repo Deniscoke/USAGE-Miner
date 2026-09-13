@@ -76,8 +76,17 @@ export async function enqueue(
   now = Date.now(),
 ): Promise<number> {
   const existing = await readBuffer();
+  // One entry per localEventId. Without this, every failed flush wrote the
+  // buffer back into itself: its size doubled on each retry, and at the cap the
+  // copies pushed real, older observations out before they were ever sent.
+  const seen = new Set<string>();
   const merged = [...existing, ...observations.map((o) => stripToSchema(o as unknown as Record<string, unknown>))]
-    .filter((o) => fresh(o, now));
+    .filter((o) => fresh(o, now))
+    .filter((o) => {
+      if (seen.has(o.localEventId)) return false;
+      seen.add(o.localEventId);
+      return true;
+    });
   const kept = merged.slice(-BUFFER_LIMITS.maxObservations);
   await writeBuffer(kept);
   return kept.length;

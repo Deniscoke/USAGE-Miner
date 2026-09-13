@@ -3,6 +3,10 @@ import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { hostname, platform, release } from "node:os";
 import { fetchConfig, pollPairing, sendHeartbeat, startPairing, type MinerConfig } from "./api.js";
+import { startBackgroundLoop } from "./background.js";
+import { pending } from "./telemetry/buffer.js";
+import { createUploader } from "./telemetry/uploader.js";
+import { loadDeviceKey } from "./device-key.js";
 import { logEvent } from "./log.js";
 import { clearCredential, loadCredential, saveCredential, type StoredCredential } from "./secrets.js";
 import { claudeCodeAdapter } from "./tools/claude-code.js";
@@ -212,7 +216,9 @@ async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
  * provider is connected, which is rare.
  */
 const CONFIG_TTL_MS = 30_000;
-const HEARTBEAT_INTERVAL_MS = 5 * 60_000;
+// Every minute. The server calls a device online if it was seen in the last
+// five, so a five-minute beat flickered offline even while the miner ran.
+const HEARTBEAT_INTERVAL_MS = 60_000;
 let configCache: { at: number; config: MinerConfig } | null = null;
 const USAGE_TTL_MS = 20_000;
 let usageCache: { at: number; value: DeviceUsageSummary | null } = { at: 0, value: null };
@@ -517,6 +523,19 @@ export interface DesktopHandle {
   close(): Promise<void>;
 }
 
+/** One background pass: heartbeat and state refresh, then drain the buffer. */
+async function backgroundTick(): Promise<void> {
+  const credential = await loadCredential();
+  if (!credential) return;
+
+  // buildState sends the heartbeat when it is due and refreshes today's figures.
+  await buildState(null).catch(() => undefined);
+
+  if ((await pending()).length === 0) return;
+  const key = await loadDeviceKey();
+  await createUploader({ serverUrl: credential.serverUrl, token: credential.token, key }).flush();
+}
+
 export async function startDesktop(): Promise<DesktopHandle> {
   // Guessing this is the only thing standing between a hostile local page and
   // the miner's controls, so it is full-strength random, not a counter.
@@ -777,6 +796,13 @@ export async function startDesktop(): Promise<DesktopHandle> {
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   port = (server.address() as { port: number }).port;
+
+  // Presence and syncing run in this process on a timer, not in the page's
+  // poll. A closed or throttled browser tab no longer makes a running miner
+  // look offline, and telemetry buffered during an outage is sent as soon as
+  // USAGE is reachable again instead of waiting for the next launched session.
+  const background = startBackgroundLoop({ tick: backgroundTick });
+  server.on("close", () => background.stop());
   const appUrl = `http://127.0.0.1:${port}/?k=${nonce}`;
 
   process.stdout.write(`USAGE Miner ${VERSION}\nOpening ${appUrl}\n`);
