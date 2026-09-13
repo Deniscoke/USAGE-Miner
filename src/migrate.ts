@@ -2,6 +2,7 @@ import { rotateCredential } from "./api.js";
 import { logEvent } from "./log.js";
 import { loadCredential, saveCredential } from "./secrets.js";
 import { migrateLegacyCredential } from "./tools/claude-code.js";
+import { removeLegacyCodexRouting } from "./tools/codex.js";
 
 /**
  * Undo what an earlier build did to this machine.
@@ -32,9 +33,19 @@ export interface MigrationResult {
 }
 
 export async function migrateInsecureConfig(): Promise<MigrationResult> {
+  // Codex routing written by an earlier build broke a plain `codex`. It holds
+  // no secret, so removing it needs no rotation -- only a notice.
+  const codex = await removeLegacyCodexRouting().catch(() => ({ removed: false }));
+  if (codex.removed) {
+    await logEvent({ event: "migrate", tool: "codex", outcome: "ok", detail: "removed_persistent_routing" });
+  }
+  const codexNote = "Codex routing is no longer written into its config file, so Codex works normally when started on its own; use Start with USAGE to mine with it.";
+
   const cleanup = await migrateLegacyCredential();
   if (!cleanup.migrated) {
-    return { changed: false, credentialRotated: false, detail: cleanup.detail };
+    return codex.removed
+      ? { changed: true, credentialRotated: false, detail: codexNote }
+      : { changed: false, credentialRotated: false, detail: cleanup.detail };
   }
 
   await logEvent({

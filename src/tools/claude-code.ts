@@ -206,7 +206,9 @@ export const claudeCodeAdapter: LocalToolAdapter = {
    * which of the two it is doing before launching.
    */
   launchPlan(route: RouteConfig) {
-    if (route.session) {
+    // A Claude route session always comes with its isolated profile; without
+    // one the session is not used, rather than sharing the user's own profile.
+    if (route.session?.profileDir) {
       const env: Record<string, string> = {
         CLAUDE_CONFIG_DIR: route.session.profileDir,
         ANTHROPIC_BASE_URL: route.url,

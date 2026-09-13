@@ -13,7 +13,7 @@ import {
 } from "./api.js";
 import { chooseRoute } from "./route.js";
 import { prepareUsageClaudeProfile } from "./tools/claude-profile.js";
-import type { RouteConfig } from "./tools/adapter.js";
+import type { LaunchPlan, RouteConfig } from "./tools/adapter.js";
 import { logEvent } from "./log.js";
 import { migrateInsecureConfig } from "./migrate.js";
 import {
@@ -434,7 +434,7 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
 
   const env: NodeJS.ProcessEnv = { ...process.env };
   const extraArgs: string[] = [];
-  let plan: { command: string; env: Record<string, string> } = { command: adapter.id, env: {} };
+  let plan: LaunchPlan = { command: adapter.id, env: {} };
   let auth = "none";
 
   if (route) {
@@ -451,19 +451,25 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
     // A route session (M16C0): only for a connected provider route, only when
     // the server can mint one. The token lives in this object and the child's
     // environment, and expires on its own.
-    if (adapter.id === "claude-code" && route.kind === "provider" && route.connectionId && config.routeSessions?.available) {
+    if ((adapter.id === "claude-code" || adapter.id === "codex") && route.kind === "provider" && route.connectionId && config.routeSessions?.available) {
       try {
         const session: RouteSession = await createRouteSession(serverUrl(credential), credential.token, {
           tool: adapter.id,
           connectionId: route.connectionId,
           surface: route.surface,
         });
-        const profile = await prepareUsageClaudeProfile();
-        launch = { ...base, session: { token: session.token, expiresAt: session.expiresAt, profileDir: profile.dir } };
-        const expires = new Date(session.expiresAt);
-        auth = `USAGE route session · expires ${expires.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · your Claude login is not used or changed` +
-          (profile.unshared.length ? ` · not shared: ${profile.unshared.join(", ")}` : "");
-        if (profile.removedSavedLogin) auth += " · a login saved inside the USAGE profile was removed";
+        if (adapter.id === "codex") {
+          // Codex needs no isolated profile: its provider comes from `-c`
+          // overrides for this invocation, and its own login is never read.
+          launch = { ...base, session: { token: session.token, expiresAt: session.expiresAt } };
+          auth = "USAGE route session · routing only, bound to this connection · renewed while this window runs";
+        } else {
+          const profile = await prepareUsageClaudeProfile();
+          launch = { ...base, session: { token: session.token, expiresAt: session.expiresAt, profileDir: profile.dir } };
+          auth = "USAGE route session · renewed while this window runs · your Claude login is not used or changed" +
+            (profile.unshared.length ? ` · not shared: ${profile.unshared.join(", ")}` : "");
+          if (profile.removedSavedLogin) auth += " · a login saved inside the USAGE profile was removed";
+        }
       } catch (error) {
         auth = `your Claude login (route session failed: ${(error as Error).message}) — /status cannot show the route as proven`;
       }
@@ -526,7 +532,7 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
   out("  Session only — no credential is written to disk.");
   out("");
 
-  const child = spawn(plan.command, [...extraArgs, ...args], { stdio: "inherit", env, shell: true });
+  const child = spawn(plan.command, [...(plan.args ?? []), ...extraArgs, ...args], { stdio: "inherit", env, shell: true });
 
   // A launched session keeps the device visibly online for as long as the tool
   // runs. It used to send no heartbeat at all, so a PC mining for hours from a

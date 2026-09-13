@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { claudeCodeAdapter, migrateLegacyCredential } from "./claude-code.js";
-import { codexAdapter, CODEX_MANAGED_MARKERS } from "./codex.js";
+import { codexAdapter, CODEX_MANAGED_MARKERS, removeLegacyCodexRouting } from "./codex.js";
 import { scrubForLog } from "../log.js";
 
 /**
@@ -387,5 +387,50 @@ describe("migrating a machine an older build wrote a credential onto", () => {
     expect(result.migrated).toBe(true);
     expect(result.restoredFromBackup).toBe(true);
     expect(await readClaudeSettings()).toEqual(original);
+  });
+});
+
+describe("Codex is launched, never configured", () => {
+  it("passes the provider for one invocation and writes nothing to config.toml", async () => {
+    const plan = codexAdapter.launchPlan({ ...ROUTE, session: { token: "usgr_session", expiresAt: "2026-09-14T08:00:00Z" } });
+    expect(plan.args).toContain('model_provider="usage"');
+    expect(plan.args).toContain(`model_providers.usage.base_url="${ROUTE.url}/v1"`);
+    expect(plan.args).toContain('model_providers.usage.env_key="USAGE_MINER_TOKEN"');
+    await expect(readFile(codexConfigPath(), "utf8")).rejects.toThrow();
+  });
+
+  it("hands Codex the routing-only session, not the full device credential, when one exists", () => {
+    const withSession = codexAdapter.launchPlan({ ...ROUTE, session: { token: "usgr_session", expiresAt: "2026-09-14T08:00:00Z" } });
+    expect(withSession.env.USAGE_MINER_TOKEN).toBe("usgr_session");
+    const without = codexAdapter.launchPlan(ROUTE);
+    expect(without.env.USAGE_MINER_TOKEN).toBe(ROUTE.minerToken);
+  });
+
+  it("starts Codex untouched when there is no route", () => {
+    const plan = codexAdapter.launchPlan({ url: "", minerToken: "", label: "" });
+    expect(plan.env).toEqual({});
+    expect(plan.args ?? []).toEqual([]);
+  });
+
+  it("is launch-only, so the window never offers to write its config", () => {
+    expect(codexAdapter.persistentConfig).toBe("unsafe");
+  });
+
+  it("removes the block an earlier build wrote, and keeps everything the user wrote around it", async () => {
+    await mkdir(process.env.CODEX_HOME!, { recursive: true });
+    await writeFile(codexConfigPath(), 'approval_policy = "on-request"\n', "utf8");
+    await codexAdapter.enableMining(ROUTE);
+    // The user edits the file after enabling.
+    const enabled = await readFile(codexConfigPath(), "utf8");
+    await writeFile(codexConfigPath(), `${enabled}\nsandbox_mode = "workspace-write"\n`, "utf8");
+
+    expect(await removeLegacyCodexRouting()).toEqual({ removed: true });
+    const cleaned = await readFile(codexConfigPath(), "utf8");
+    expect(cleaned).not.toContain(CODEX_MANAGED_MARKERS.BEGIN_MARKER);
+    expect(cleaned).not.toContain("model_provider");
+    expect(cleaned).toContain('approval_policy = "on-request"');
+    // The later edit survives: the old backup was not restored over it.
+    expect(cleaned).toContain('sandbox_mode = "workspace-write"');
+    expect(await removeLegacyCodexRouting()).toEqual({ removed: false });
   });
 });

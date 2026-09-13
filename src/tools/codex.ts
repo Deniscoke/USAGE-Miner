@@ -6,6 +6,7 @@ import {
   backupName,
   probeVersion,
   type EnableResult,
+  type LaunchPlan,
   type LocalToolAdapter,
   type RouteConfig,
   type RoutingState,
@@ -102,24 +103,45 @@ function foreignProvider(text: string): string | null {
   return match ? match[1] : null;
 }
 
+/**
+ * Remove the routing block an earlier build wrote into ~/.codex/config.toml.
+ *
+ * Only our own delimited block is removed. The full pre-enable backup is NOT
+ * restored: the user may have edited the file since, and putting back an old
+ * copy would silently undo their changes. The backup is deleted afterwards so
+ * a later `disable` cannot do that either.
+ */
+export async function removeLegacyCodexRouting(): Promise<{ removed: boolean }> {
+  let config: { text: string; existed: boolean };
+  try {
+    config = await readConfig();
+  } catch {
+    return { removed: false };
+  }
+  if (!config.existed || !config.text.includes(BEGIN_MARKER)) return { removed: false };
+  await writeFile(configPath(), stripManagedBlock(config.text).trimEnd() + "\n", "utf8");
+  await rm(backupPath(), { force: true });
+  return { removed: true };
+}
+
 export const codexAdapter: LocalToolAdapter = {
   id: "codex",
   displayName: "Codex",
   protocol: "openai_compatible",
 
   /**
-   * Safe, and kept that way.
+   * Launch only.
    *
-   * Codex's config names the credential (`env_key = "USAGE_MINER_TOKEN"`)
-   * rather than containing it, so persistent configuration here writes no
-   * secret to disk. Claude Code's limitation is Claude Code's; there is no
-   * reason to inflict it on a tool that got this right.
-   *
-   * Persistent mode still needs the variable to be set when Codex runs, which
-   * is what the launcher does -- so `usage run codex` remains the reliable path
-   * and the reason both modes exist.
+   * Persistent mode wrote `model_provider = "usage"` into ~/.codex/config.toml
+   * with `env_key = "USAGE_MINER_TOKEN"`. The file held no secret, which is why
+   * it was called safe -- but only the miner's launcher sets that variable, so
+   * from then on a plain `codex`, or Codex started by an editor, failed on
+   * every run for want of it. A setting that breaks the tool whenever it is not
+   * started by us is not safe. The launcher now passes the same provider
+   * settings as `-c` overrides that live for one invocation, and a block left
+   * by an earlier build is removed on upgrade.
    */
-  persistentConfig: "safe",
+  persistentConfig: "unsafe",
 
   capabilities() {
     return {
@@ -165,16 +187,26 @@ export const codexAdapter: LocalToolAdapter = {
     };
   },
 
-  launchPlan(route: RouteConfig) {
+  launchPlan(route: RouteConfig): LaunchPlan {
+    // No route: start Codex exactly as the user would, touching nothing.
+    if (!route.url) return { command: "codex", env: {} };
     return {
       command: "codex",
       env: {
-        USAGE_MINER_TOKEN: route.minerToken,
-        // Codex reads its endpoint from config, not the environment; this is
-        // recorded so a launched session is self-describing rather than
-        // depending on a config file having been written earlier.
-        USAGE_ROUTE_URL: route.url,
+        // A route session when the server minted one: bound to this tool, one
+        // connection and one surface, with no scope beyond routing. The full
+        // device credential only as the fallback for servers without sessions.
+        USAGE_MINER_TOKEN: route.session?.token ?? route.minerToken,
       },
+      // The provider, for this invocation only. Nothing is written to
+      // config.toml, so a plain `codex` afterwards is the user's own Codex.
+      args: [
+        "-c", `model_provider="${PROVIDER_ID}"`,
+        "-c", `model_providers.${PROVIDER_ID}.name="USAGE (${route.label.replace(/"/g, "'")})"`,
+        "-c", `model_providers.${PROVIDER_ID}.base_url="${route.url}/v1"`,
+        "-c", `model_providers.${PROVIDER_ID}.wire_api="chat"`,
+        "-c", `model_providers.${PROVIDER_ID}.env_key="USAGE_MINER_TOKEN"`,
+      ],
     };
   },
 

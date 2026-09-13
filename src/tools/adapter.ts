@@ -111,7 +111,7 @@ export interface RouteConfig {
    * the tool authenticates to USAGE with it instead of carrying the device
    * credential in a custom header, and the user's own login is not used.
    */
-  session?: { token: string; expiresAt: string; profileDir: string };
+  session?: { token: string; expiresAt: string; profileDir?: string };
 }
 
 export interface EnableResult {
@@ -124,8 +124,10 @@ export interface EnableResult {
 /**
  * Whether this tool can be routed by editing its config file.
  *
- *   "safe"    its config can name a credential rather than contain one
- *   "unsafe"  routing it persistently would mean writing a secret to disk
+ *   "safe"    its config can name a credential rather than contain one, AND the
+ *             tool still works when started without the miner
+ *   "unsafe"  routing it persistently would write a secret to disk, or would
+ *             leave the tool broken whenever it is started any other way
  */
 export type PersistentConfigSupport = "safe" | "unsafe";
 
@@ -138,6 +140,8 @@ export interface LaunchPlan {
    * process -- which is the entire point.
    */
   env: Record<string, string>;
+  /** Arguments for this invocation only, placed before the user's own. */
+  args?: string[];
 }
 
 export interface LocalToolAdapter {

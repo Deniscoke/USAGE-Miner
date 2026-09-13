@@ -162,16 +162,16 @@ describe("the local desktop server", () => {
     expect((await response.json()).error).toBe("launch_only");
   });
 
-  it("will not write a config file for a tool that is not installed", async () => {
+  it("will not write routing into Codex's config file, because it broke a plain codex", async () => {
     const response = await fetch(`${base}/enable?k=${nonce}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tool: "codex" }),
     });
-    // Codex is absent on the machine running these tests; if it were present
-    // the next gate is sign-in, which is equally a refusal.
-    expect([400, 401]).toContain(response.status);
-    expect(["not_installed", "not_signed_in"]).toContain((await response.json()).error);
+    // Every routable tool is launch-only now: the config a persistent enable
+    // wrote left the tool failing whenever it was started without the miner.
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("launch_only");
   });
 
   it("refuses to launch a tool before the device is signed in", async () => {
@@ -189,6 +189,6 @@ describe("the local desktop server", () => {
     const claude = state.tools.find((tool: { id: string }) => tool.id === "claude-code");
     const codex = state.tools.find((tool: { id: string }) => tool.id === "codex");
     expect(claude.mode).toBe("launch");
-    expect(codex.mode).toBe("configure");
+    expect(codex.mode).toBe("launch");
   });
 });
