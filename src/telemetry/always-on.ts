@@ -47,6 +47,8 @@ interface AlwaysOnState {
   receiverKey: string;
   /** The exact values written, so disabling removes only what is still ours. */
   written: Record<string, string>;
+  /** What each of those keys held before, or null if absent, so disabling can put it back. */
+  previous?: Record<string, string | null>;
   enabledAt: string | null;
 }
 
@@ -79,8 +81,9 @@ export function alwaysOnClaudeEnv(receiverKey: string, port: number = ALWAYS_ON_
   return {
     CLAUDE_CODE_ENABLE_TELEMETRY: "1",
     OTEL_LOGS_EXPORTER: "otlp",
-    OTEL_METRICS_EXPORTER: "none",
-    OTEL_TRACES_EXPORTER: "none",
+    // Metrics and traces are not written at all. Setting them to "none" broke a
+    // user's own metrics or traces pipeline, and Claude Code exports neither
+    // unless an exporter is named.
     // Per-signal names, so a user's own collector configured through the
     // generic OTEL_EXPORTER_OTLP_* variables is left alone for other signals.
     OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json",
@@ -138,6 +141,12 @@ export async function enableAlwaysOn(options: { force?: boolean } = {}): Promise
     }
   }
 
+  // What each key held before this switch touched it. Kept from the first
+  // enable, so turning it on twice does not record our own values as theirs.
+  const previousValues: Record<string, string | null> = previous?.enabled && previous.previous
+    ? previous.previous
+    : Object.fromEntries(Object.keys(wanted).map((key) => [key, typeof env[key] === "string" ? (env[key] as string) : null]));
+
   const next: ClaudeSettings = { ...settings, env: { ...env, ...wanted } };
   await mkdir(path.dirname(claudeSettingsPath()), { recursive: true });
   // Kept once, the first time, so a person can always see what was there.
@@ -145,7 +154,7 @@ export async function enableAlwaysOn(options: { force?: boolean } = {}): Promise
     await writeFile(path.join(configDir(), "claude-settings-before-always-on.json"), raw, { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
   }
   await writeFile(claudeSettingsPath(), `${JSON.stringify(next, null, 2)}\n`, "utf8");
-  await writeState({ version: 1, enabled: true, receiverKey, written: wanted, enabledAt: new Date().toISOString() });
+  await writeState({ version: 1, enabled: true, receiverKey, written: wanted, previous: previousValues, enabledAt: new Date().toISOString() });
   return { ok: true, changed: true, message: "Claude Code sessions started anywhere on this PC are now measured while USAGE Miner runs." };
 }
 
@@ -165,9 +174,14 @@ export async function disableAlwaysOn(): Promise<AlwaysOnResult> {
 
   if (settings) {
     const env = { ...((settings.env ?? {}) as Record<string, unknown>) };
-    // Only what is still exactly ours. A key the user has since changed is theirs now.
+    // Only what is still exactly ours. A key the user has since changed is
+    // theirs now and stays. A key that is still ours goes back to what it held
+    // before -- or away, if it held nothing.
     for (const [key, value] of Object.entries(state.written)) {
-      if (env[key] === value) delete env[key];
+      if (env[key] !== value) continue;
+      const before = state.previous?.[key] ?? null;
+      if (before === null) delete env[key];
+      else env[key] = before;
     }
     const next: ClaudeSettings = { ...settings };
     if (Object.keys(env).length > 0) next.env = env;

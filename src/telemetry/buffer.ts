@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, rm } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { configDir, protectString, unprotectString } from "../secrets.js";
 import { stripToSchema, type LocalUsageObservation } from "./observation.js";
@@ -59,10 +60,28 @@ async function writeBuffer(observations: LocalUsageObservation[]): Promise<void>
   }
   const file: BufferFile = { version: 1, observations };
   await mkdir(configDir(), { recursive: true });
-  await writeFile(bufferPath(), await protectString(JSON.stringify(file)), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  // Written beside the real file and renamed over it. A reader -- another
+  // writer in this process, or a `usage run` session -- then sees the old
+  // buffer or the new one, never half of one. A half-written file failed to
+  // parse, read as empty, and the next write saved that emptiness.
+  const temporary = `${bufferPath()}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(temporary, await protectString(JSON.stringify(file)), { encoding: "utf8", mode: 0o600 });
+  await rename(temporary, bufferPath());
+}
+
+/**
+ * One read-modify-write at a time within this process. The desktop's background
+ * tick and the always-on receiver both touch the buffer; without this, one's
+ * rewrite dropped the other's additions. (A separate `usage run` process is a
+ * second writer this cannot see; the atomic rename keeps that case from
+ * corrupting the file, and the server's localEventId dedupe makes a re-sent
+ * observation harmless.)
+ */
+let queue: Promise<unknown> = Promise.resolve();
+function serialised<T>(work: () => Promise<T>): Promise<T> {
+  const next = queue.then(work, work);
+  queue = next.catch(() => undefined);
+  return next;
 }
 
 function fresh(observation: LocalUsageObservation, now: number): boolean {
@@ -75,6 +94,10 @@ export async function enqueue(
   observations: readonly LocalUsageObservation[],
   now = Date.now(),
 ): Promise<number> {
+  return serialised(() => enqueueNow(observations, now));
+}
+
+async function enqueueNow(observations: readonly LocalUsageObservation[], now: number): Promise<number> {
   const existing = await readBuffer();
   // One entry per localEventId. Without this, every failed flush wrote the
   // buffer back into itself: its size doubled on each retry, and at the cap the
@@ -100,8 +123,10 @@ export async function pending(now = Date.now()): Promise<LocalUsageObservation[]
 /** Remove observations that were accepted (or permanently rejected) upstream. */
 export async function acknowledge(localEventIds: readonly string[]): Promise<void> {
   const done = new Set(localEventIds);
-  const remaining = (await readBuffer()).filter((o) => !done.has(o.localEventId));
-  await writeBuffer(remaining);
+  await serialised(async () => {
+    const remaining = (await readBuffer()).filter((o) => !done.has(o.localEventId));
+    await writeBuffer(remaining);
+  });
 }
 
 export async function clearBuffer(): Promise<void> {

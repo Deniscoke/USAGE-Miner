@@ -42,8 +42,9 @@ describe("the environment written for Claude Code", () => {
   it("points only the logs signal at the loopback receiver", () => {
     expect(env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).toBe("http://127.0.0.1:47823/v1/logs");
     expect(env.OTEL_EXPORTER_OTLP_LOGS_PROTOCOL).toBe("http/json");
-    expect(env.OTEL_METRICS_EXPORTER).toBe("none");
-    expect(env.OTEL_TRACES_EXPORTER).toBe("none");
+    // Not written at all: "none" would have switched off a user's own pipeline.
+    expect(env.OTEL_METRICS_EXPORTER).toBeUndefined();
+    expect(env.OTEL_TRACES_EXPORTER).toBeUndefined();
   });
 
   it("switches every content setting off explicitly", () => {
@@ -241,4 +242,28 @@ describe("the always-on service, end to end", () => {
     await service.refresh();
     expect(service.state().listening).toBe("off");
   }, 30_000);
+});
+
+describe("putting back what was there", () => {
+  it("restores a key the user already had, instead of deleting it", async () => {
+    await writeSettings({ env: { CLAUDE_CODE_ENABLE_TELEMETRY: "1", OTEL_LOG_USER_PROMPTS: "1", OTEL_METRICS_EXPORTER: "otlp" } });
+    await enableAlwaysOn();
+    const on = await readSettings();
+    expect(on.env!.OTEL_LOG_USER_PROMPTS).toBe("0");
+    // Their metrics pipeline is untouched while it is on.
+    expect(on.env!.OTEL_METRICS_EXPORTER).toBe("otlp");
+
+    await disableAlwaysOn();
+    const off = await readSettings();
+    expect(off.env).toEqual({ CLAUDE_CODE_ENABLE_TELEMETRY: "1", OTEL_LOG_USER_PROMPTS: "1", OTEL_METRICS_EXPORTER: "otlp" });
+  });
+
+  it("does not mistake its own values for the user's when turned on twice", async () => {
+    await writeSettings({ env: {} });
+    await enableAlwaysOn();
+    await enableAlwaysOn();
+    await disableAlwaysOn();
+    const off = await readSettings();
+    expect(off.env).toBeUndefined();
+  });
 });

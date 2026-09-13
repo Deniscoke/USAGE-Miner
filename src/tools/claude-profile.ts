@@ -107,7 +107,14 @@ export async function prepareUsageClaudeProfile(input: { source?: string; dir?: 
     delete settings.apiKeyHelper;
     if (settings.env && typeof settings.env === "object") {
       for (const key of Object.keys(settings.env)) {
-        if (/^ANTHROPIC_/.test(key) || key === "CLAUDE_CONFIG_DIR") delete settings.env[key];
+        // Telemetry keys too. "Measure Claude Code everywhere" writes OTEL_*
+        // into the user's settings; copied here they would point a launched
+        // session at the always-on port instead of its own receiver, and with
+        // the window closed that session's usage would simply be lost. The
+        // launch supplies every telemetry setting the session needs.
+        if (/^ANTHROPIC_/.test(key) || /^OTEL_/.test(key) || key === "CLAUDE_CODE_ENABLE_TELEMETRY" || key === "CLAUDE_CONFIG_DIR") {
+          delete settings.env[key];
+        }
       }
       if (Object.keys(settings.env).length === 0) delete settings.env;
     }

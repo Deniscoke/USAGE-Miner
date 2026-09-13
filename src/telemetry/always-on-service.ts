@@ -50,6 +50,9 @@ export function createAlwaysOnService(deps: {
   let events = 0;
   let lastEventAt: string | null = null;
   let chain: Promise<void> = Promise.resolve();
+  // One refresh at a time. Two at once both saw no receiver, both started one,
+  // and the loser nulled the winner's handle -- a listener nothing could close.
+  let refreshing: Promise<void> = Promise.resolve();
 
   async function handle(records: Parameters<Parameters<typeof startTelemetryReceiver>[0]>[0]): Promise<void> {
     const observations = normalizeRecords(records, CLAUDE_CODE_MAPPING, { toolVersion: null, localSessionId });
@@ -107,13 +110,17 @@ export function createAlwaysOnService(deps: {
   return {
     state: () => ({ listening, eventsSinceStart: events, lastEventAt }),
     idle: () => chain,
-    async refresh() {
-      const status = await alwaysOnStatus();
-      if (status.enabled && status.receiverKey) {
-        if (!receiver) await start(status.receiverKey);
-      } else {
-        await stop();
-      }
+    refresh() {
+      refreshing = refreshing.then(async () => {
+        const status = await alwaysOnStatus();
+        if (status.enabled && status.receiverKey) {
+          // Also retries a port that was busy last time.
+          if (!receiver) await start(status.receiverKey);
+        } else {
+          await stop();
+        }
+      }).catch(() => undefined);
+      return refreshing;
     },
     stop,
   };

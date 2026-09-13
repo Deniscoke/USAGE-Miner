@@ -202,7 +202,10 @@ export const codexAdapter: LocalToolAdapter = {
       // config.toml, so a plain `codex` afterwards is the user's own Codex.
       args: [
         "-c", `model_provider="${PROVIDER_ID}"`,
-        "-c", `model_providers.${PROVIDER_ID}.name="USAGE (${route.label.replace(/"/g, "'")})"`,
+        // A plain word. The launch goes through cmd.exe, which strips inner
+        // quotes and expands %; a label with spaces, brackets or % did not
+        // survive it. The route is named on screen before launch instead.
+        "-c", `model_providers.${PROVIDER_ID}.name="USAGE"`,
         "-c", `model_providers.${PROVIDER_ID}.base_url="${route.url}/v1"`,
         "-c", `model_providers.${PROVIDER_ID}.wire_api="chat"`,
         "-c", `model_providers.${PROVIDER_ID}.env_key="USAGE_MINER_TOKEN"`,

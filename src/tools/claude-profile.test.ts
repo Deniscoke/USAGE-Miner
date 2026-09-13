@@ -24,7 +24,19 @@ beforeEach(async () => {
   await writeFile(path.join(source, "plugins", "marker.txt"), "shared", "utf8");
   await writeFile(
     path.join(source, "settings.json"),
-    JSON.stringify({ enabledPlugins: { "x@y": true }, apiKeyHelper: "get-key.sh", env: { ANTHROPIC_BASE_URL: "https://elsewhere", ANTHROPIC_AUTH_TOKEN: "sk-should-not-copy", OTEL_X: "1" } }),
+    JSON.stringify({
+      enabledPlugins: { "x@y": true },
+      apiKeyHelper: "get-key.sh",
+      env: {
+        ANTHROPIC_BASE_URL: "https://elsewhere",
+        ANTHROPIC_AUTH_TOKEN: "sk-should-not-copy",
+        // What "measure Claude Code everywhere" writes: it must not follow the
+        // launch into its profile, or the session exports to the wrong place.
+        CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+        OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "http://127.0.0.1:47823/v1/logs",
+        MY_OWN_VAR: "kept",
+      },
+    }),
     "utf8",
   );
   await writeFile(path.join(source, "CLAUDE.md"), "# rules", "utf8");
@@ -53,7 +65,8 @@ describe("the USAGE Claude profile", () => {
     const settings = JSON.parse(await readFile(path.join(profile, "settings.json"), "utf8"));
     expect(settings.enabledPlugins).toEqual({ "x@y": true });
     expect(settings.apiKeyHelper).toBeUndefined();
-    expect(settings.env).toEqual({ OTEL_X: "1" });
+    // Credentials and telemetry routing are stripped; the user's own variables stay.
+    expect(settings.env).toEqual({ MY_OWN_VAR: "kept" });
     expect(JSON.stringify(settings)).not.toContain("sk-should-not-copy");
     const config = JSON.parse(await readFile(path.join(profile, ".claude.json"), "utf8"));
     expect(config).toEqual({ hasCompletedOnboarding: true, theme: "dark" });

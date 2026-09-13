@@ -225,7 +225,8 @@ async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
 const CONFIG_TTL_MS = 30_000;
 // Every minute. The server calls a device online if it was seen in the last
 // five, so a five-minute beat flickered offline even while the miner ran.
-const HEARTBEAT_INTERVAL_MS = 60_000;
+// Just under the background tick, so every tick beats rather than every other.
+const HEARTBEAT_INTERVAL_MS = 55_000;
 let configCache: { at: number; config: MinerConfig } | null = null;
 const USAGE_TTL_MS = 20_000;
 let usageCache: { at: number; value: DeviceUsageSummary | null } = { at: 0, value: null };
@@ -609,6 +610,9 @@ export async function startDesktop(): Promise<DesktopHandle> {
       }
 
       if (url.pathname === "/sign-out" && request.method === "POST") {
+        // Leaving the account also takes USAGE's settings out of Claude Code.
+        await disableAlwaysOn().catch(() => null);
+        await alwaysOnService?.refresh().catch(() => undefined);
         await clearCredential();
         invalidateConfigCache();
         json(response, { ok: true });

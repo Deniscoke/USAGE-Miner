@@ -75,9 +75,17 @@ const BACKOFF_STEPS = [5, 15, 60, 300];
  */
 export const MAX_UPLOAD_BATCH = 100;
 
-/** The server looked at this and will never accept it, however often it is sent. */
-function isPermanentRejection(status: number | null): boolean {
-  return status === 400 || status === 413 || status === 422;
+/**
+ * Too big to accept, which a smaller batch fixes.
+ *
+ * Only this. The server reports a bad single observation inside a 200, as
+ * `rejected`; its 400s and 422s are about the whole request -- a schema it no
+ * longer accepts, a proxy or captive portal answering for it. Halving on those
+ * reached every item and dropped each one, which wiped a whole buffer of good
+ * observations on one bad answer.
+ */
+function isTooLarge(status: number | null): boolean {
+  return status === 413;
 }
 
 function chunks<T>(items: readonly T[], size: number): T[][] {
@@ -134,11 +142,10 @@ export function createUploader(input: {
         const code = (error as { code?: string }).code ?? null;
         const status = (error as { status?: number }).status ?? null;
 
-        if (isPermanentRejection(status)) {
-          // One bad observation must not hold back the good ones around it.
-          // Halve the batch until the refusal is pinned to a single item,
-          // then drop that one item: the server will never take it, and
-          // keeping it would block everything queued behind it forever.
+        if (isTooLarge(status)) {
+          // Halve until it fits. A single observation still too large for
+          // the server is dropped: it can never be sent, and keeping it would
+          // block everything queued behind it forever.
           if (batch.length > 1) {
             const half = Math.ceil(batch.length / 2);
             queue.splice(i + 1, 0, batch.slice(0, half), batch.slice(half));

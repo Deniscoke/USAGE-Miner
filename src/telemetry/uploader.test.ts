@@ -91,18 +91,41 @@ describe("uploading after an outage", () => {
     expect(await pending()).toEqual([]);
   }, 30_000);
 
-  it("drops only the one observation the server will never accept, and keeps the rest flowing", async () => {
+  it("halves a batch the server calls too large, and drops only an observation too large on its own", async () => {
     const { createUploader } = await import("./uploader.js");
     const { enqueue, pending } = await import("./buffer.js");
     await enqueue(Array.from({ length: 10 }, (_, i) => observation(i)));
 
-    const server = fakeServer({ refuse: (id) => id === "evt_7" });
-    const uploader = createUploader({ serverUrl: "https://usage.invalid", token: "t", key, upload: server.upload });
+    // evt_7 alone is too big: any batch containing it gets a 413.
+    const upload = async (_u: string, _t: string, batch: SignedObservation[]) => {
+      if (batch.some((b) => b.observation.localEventId === "evt_7")) {
+        throw Object.assign(new Error("too large"), { code: "too_large", status: 413 });
+      }
+      return { accepted: batch.length, duplicate: 0, rejected: 0 };
+    };
+    const uploader = createUploader({ serverUrl: "https://usage.invalid", token: "t", key, upload });
     const outcome = await uploader.flush();
 
     expect(outcome.uploaded).toBe(9);
     expect(outcome.errorCode ?? null).toBeNull();
     expect(await pending()).toEqual([]);
+  }, 30_000);
+
+  it("keeps the whole buffer when the server refuses the request itself, instead of wiping it", async () => {
+    const { createUploader } = await import("./uploader.js");
+    const { enqueue, pending } = await import("./buffer.js");
+    await enqueue(Array.from({ length: 10 }, (_, i) => observation(i)));
+
+    // A schema the server no longer accepts, or a captive portal: a 400 for everything.
+    const upload = async () => {
+      throw Object.assign(new Error("bad"), { code: "unsupported_schema", status: 400 });
+    };
+    const uploader = createUploader({ serverUrl: "https://usage.invalid", token: "t", key, upload });
+    const outcome = await uploader.flush();
+
+    expect(outcome.uploaded).toBe(0);
+    expect(outcome.errorCode).toBe("unsupported_schema");
+    expect((await pending()).length).toBe(10);
   }, 30_000);
 
   it("keeps everything and backs off when USAGE cannot be reached", async () => {
@@ -146,5 +169,18 @@ describe("the buffer itself", () => {
     await enqueue(batch);
     await enqueue(batch);
     expect((await pending()).length).toBe(5);
+  }, 30_000);
+});
+
+describe("two writers in one process", () => {
+  it("loses nothing when adds and acknowledgements interleave", async () => {
+    const { enqueue, acknowledge, pending } = await import("./buffer.js");
+    await enqueue(Array.from({ length: 20 }, (_, i) => observation(i)));
+    await Promise.all([
+      enqueue(Array.from({ length: 20 }, (_, i) => observation(100 + i))),
+      acknowledge(Array.from({ length: 10 }, (_, i) => `evt_${i}`)),
+      enqueue(Array.from({ length: 5 }, (_, i) => observation(200 + i))),
+    ]);
+    expect((await pending()).length).toBe(35);
   }, 30_000);
 });

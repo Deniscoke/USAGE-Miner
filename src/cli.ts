@@ -35,6 +35,7 @@ import { loadDeviceKey } from "./device-key.js";
 import { startMeteringSession } from "./telemetry/session.js";
 import { setMapping, registerDeviceKey } from "./api.js";
 import { startBackgroundLoop } from "./background.js";
+import { disableAlwaysOn } from "./telemetry/always-on.js";
 import { platform as osPlatform, release as osRelease } from "node:os";
 
 /**
@@ -387,6 +388,15 @@ async function disable(toolId: string): Promise<void> {
     detail: result.message,
   });
   out(result.message);
+
+  // "Measure Claude Code everywhere" is Claude Code's too. The uninstaller runs
+  // exactly this command, and settings left behind would keep every Claude
+  // Code session exporting to a loopback port nothing of ours listens on --
+  // one any other program could then bind.
+  if (adapter.id === "claude-code") {
+    const always = await disableAlwaysOn().catch(() => null);
+    if (always && (always.ok ? always.changed : true)) out(always.message);
+  }
   if (!result.ok) process.exit(1);
 }
 
@@ -628,6 +638,8 @@ export async function runCli(argv: string[]): Promise<void> {
         await map(args[0] ?? "", false);
         break;
       case "sign-out":
+        // Leaving the account also takes USAGE's settings out of Claude Code.
+        await disableAlwaysOn().catch(() => null);
         await clearCredential();
         out("This device is no longer connected. Revoke it at /miners to be certain.");
         break;
