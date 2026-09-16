@@ -153,9 +153,23 @@ describe("mapping shown is the server's", () => {
     expect(state.deviceId).toBe("device-new");
     expect(state.accountDisplay).toBe("de••••@example.com");
     expect(state.networkLabel).toBe("USAGE Beta Network");
-    expect(state.route?.kind).toBe("usage_gateway");
-    expect(state.route?.rewardStatus).toBe("held");
-    expect(state.whyNotEarning).toMatch(/USAGE's own gateway/);
+    // The server still advertises a claude-code fallback; the miner ignores it.
+    expect(state.route?.kind).toBe("none");
+    expect(state.route?.rewardStatus).toBe("none");
+    expect(state.whyNotEarning).toMatch(/own sign-in \(Track only\)/);
+    expect(JSON.stringify(state)).not.toMatch(/usage_gateway|fallback|USAGE gateway/);
+    // Claude Code with no route: TRACK ONLY, in exactly these words.
+    expect(claude.launch).toEqual({
+      mode: "track_only",
+      account: "your own sign-in (subscription)",
+      route: "Direct to Claude",
+      verification: "LOCAL ONLY",
+      reward: "NOT ELIGIBLE",
+      button: "Track only",
+      explanation: "USAGE can measure this usage on your PC, but it cannot independently verify the subscription billing, so it does not earn Usage Points.",
+    });
+    expect(claude.reward.status).toBe("ineligible");
+    expect(JSON.stringify([claude.launch, claude.reward, state.route, state.whyNotEarning])).not.toMatch(/mining/i);
     // And the local file now agrees with the server for this device.
     const { isMapped: mapped } = await import("./mappings.js");
     expect(await mapped("device-new", "codex")).toBe(true);

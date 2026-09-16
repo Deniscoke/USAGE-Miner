@@ -387,26 +387,23 @@ export function renderApp(nonce: string): string {
 
     // ------------------------------------------------------------ AI ROUTE
     // What actually carries Claude Code's requests when started from here.
-    // A fallback is named as a fallback; "nothing connected" and "traffic
-    // goes through USAGE's gateway" are shown together, because both are true.
+    // Two states, never blurred: a verified route on the user's own connected
+    // provider, or no route at all -- Claude Code on its own sign-in, tracked
+    // locally. There is no USAGE gateway fallback.
     var routeCard = el("div", "card");
     routeCard.appendChild(el("h2", null, "AI route"));
-    if (state.route && state.route.kind !== "none") {
+    if (state.route && state.route.kind === "provider") {
       var rRow = el("div", "row");
       var rLeft = el("div");
-      rLeft.appendChild(el("div", "name", state.route.label + (state.route.kind === "usage_gateway" ? " (fallback)" : "")));
-      // Two different states, never blurred: a connected provider that carries
-      // Claude Code's own wire format, or USAGE's held fallback.
-      rLeft.appendChild(el("div", "meta", (state.route.kind === "provider"
-        ? "Your connected provider" + (state.route.claudeCompatible ? " · Claude Code compatible" : "")
-        : "No eligible provider connected — USAGE's own gateway carries the traffic") + " · verified routing"));
+      rLeft.appendChild(el("div", "name", state.route.label));
+      rLeft.appendChild(el("div", "meta", "Your connected provider" + (state.route.claudeCompatible ? " · Claude Code compatible" : "") + " · verified routing"));
       if (state.route.wire) rLeft.appendChild(el("div", "meta", "Wire: " + state.route.wire + (state.route.auth ? " · Auth: " + state.route.auth : "")));
       rLeft.appendChild(el("div", "meta", "Reward: " + state.route.rewardStatus.toUpperCase() + " — " + state.route.reason));
       rRow.appendChild(rLeft);
       rRow.appendChild(el("span", "tag " + (state.route.rewardStatus === "eligible" ? "on" : "warn"), state.route.rewardStatus.toUpperCase()));
       routeCard.appendChild(rRow);
     } else {
-      routeCard.appendChild(el("div", "empty", "No AI route available."));
+      routeCard.appendChild(el("div", "empty", "No verified AI route. " + (state.route && state.route.reason ? state.route.reason : "Claude Code runs on its own sign-in (Track only), which does not earn.")));
     }
     if (!state.route || state.route.kind !== "provider") {
       var connect = el("button", "primary", "Connect your provider");
@@ -440,11 +437,19 @@ export function renderApp(nonce: string): string {
           var ok = tr.lastSyncOutcome === "accepted" || tr.lastSyncOutcome === "duplicate";
           left.appendChild(el("div", ok ? "meta" : "err", "Last sync         " + (tr.lastSyncAt ? fmtTime(tr.lastSyncAt) + " · " : "") + (tr.lastSyncLabel || tr.lastSyncOutcome) + (tr.buffered ? " · " + tr.buffered + " waiting" : "")));
         }
-        left.appendChild(el("div", "meta", "Verification      " + ceilingLabel(t.verificationCeiling)));
-        if (t.mode === "launch" && state.route && state.route.kind !== "none") {
-          left.appendChild(el("div", "meta", "Route             " + state.route.label + (state.route.kind === "usage_gateway" ? " (fallback)" : "") + (state.route.wire ? " · " + state.route.wire : "")));
+        var lv = t.launch;
+        if (lv) {
+          // One of exactly two modes. A track-only session is never called
+          // mining, and never shows a USAGE route.
+          if (lv.account) left.appendChild(el("div", "meta", "Account           " + lv.account));
+          left.appendChild(el("div", "meta", "Route             " + lv.route));
+          left.appendChild(el("div", "meta", "Verification      " + lv.verification));
+          left.appendChild(el("div", "meta", "Reward            " + lv.reward));
+          if (lv.explanation) left.appendChild(el("div", "note", lv.explanation));
+        } else {
+          left.appendChild(el("div", "meta", "Verification      " + ceilingLabel(t.verificationCeiling)));
+          left.appendChild(el("div", "meta", "Reward            " + (t.reward ? t.reward.status.toUpperCase() + (t.reward.reason ? " — " + t.reward.reason : "") : "—")));
         }
-        left.appendChild(el("div", "meta", "Reward            " + (t.reward ? t.reward.status.toUpperCase() + (t.reward.reason ? " — " + t.reward.reason : "") : "—")));
       }
       if (t.conflict) left.appendChild(el("div", "meta", t.conflict));
       row.appendChild(left);
@@ -472,7 +477,7 @@ export function renderApp(nonce: string): string {
         label.appendChild(el("span", null, "Map usage"));
         right.appendChild(label);
 
-        if (t.mode === "launch" || t.id === "codex") {
+        if ((t.mode === "launch" || t.id === "codex") && t.launch && t.launch.mode === "verified_route") {
           var start = el("button", "primary", "Start with USAGE");
           start.title = "Resolves the route freshly from USAGE, then starts the app routed through it, with usage tracking.";
           start.onclick = function () {
@@ -482,13 +487,30 @@ export function renderApp(nonce: string): string {
                 if (r && r.label) {
                   // What the click resolved, from the server, seconds ago.
                   var was = start.textContent;
-                  start.textContent = "Starting: " + r.label + " · " + String(r.rewardStatus || "").toUpperCase() + (r.wire ? " · " + r.wire : "");
+                  start.textContent = (r.mode === "track_only" ? "Tracking: " : "Starting: ") + r.label + " · " + String(r.reward || "") + (r.wire ? " · " + r.wire : "");
                   setTimeout(function () { start.textContent = was; }, 6000);
                 }
               });
             });
           };
           right.appendChild(start);
+        }
+        if ((t.mode === "launch" || t.id === "codex") && t.launch && t.launch.mode === "track_only") {
+          // TRACK ONLY is the only way to start an app with no verified route.
+          var track = el("button", "primary", "Track only");
+          track.disabled = t.mappingStatus !== "on";
+          track.title = t.mappingStatus === "on"
+            ? "Starts the app with its own sign-in and provider; USAGE only tracks usage on this PC. Does not earn."
+            : "Turn on Map usage first, so there is something to track.";
+          track.onclick = function () {
+            act(function () {
+              return api("/launch", { tool: t.id, route: false }).then(function (r) {
+                if (r && r.error) window.alert(r.message || "Could not start it.");
+              });
+            });
+          };
+          right.appendChild(track);
+        } else if (t.mode === "launch" || t.id === "codex") {
           if (t.mappingStatus === "on") {
             var trackOnly = el("button", null, "Track only");
             trackOnly.title = "Starts the app with its own sign-in and provider; USAGE only tracks usage.";
@@ -510,7 +532,7 @@ export function renderApp(nonce: string): string {
     });
     tools.appendChild(el("div", "note",
       "Mapping is per app and opt-in, and USAGE's record of it is what you see here. A mapped app is tracked from its own official telemetry when started from this window. " +
-      "\\"Start with USAGE\\" also routes its requests through the AI route above (stronger proof); \\"Track only\\" keeps the app on its own account. " +
+      "\\"Start with USAGE\\" routes its requests through a verified USAGE route and can earn; \\"Track only\\" keeps the app on its own sign-in, is measured on this PC only, and does not earn. " +
       "Nothing is written to the app's settings and nothing is read from your files."));
     app.appendChild(tools);
 

@@ -13,7 +13,16 @@ import {
 } from "./api.js";
 import { chooseRoute } from "./route.js";
 import { prepareUsageClaudeProfile } from "./tools/claude-profile.js";
-import type { LaunchPlan, RouteConfig } from "./tools/adapter.js";
+import type { LaunchPlan } from "./tools/adapter.js";
+import {
+  childEnvironment,
+  decideLaunch,
+  directProviderLabel,
+  notRoutedLine,
+  TRACK_ONLY_EXPLANATION,
+  wantsRouteSession,
+  type RouteSessionOutcome,
+} from "./launch.js";
 import { logEvent } from "./log.js";
 import { migrateInsecureConfig } from "./migrate.js";
 import {
@@ -367,7 +376,6 @@ async function enable(toolId: string, force: boolean): Promise<void> {
   out("");
   out(`  ${result.message}`);
   out(`  Reward: ${route.rewardStatus.toUpperCase()} — ${route.reason}`);
-  if (route.note) out(`  ${route.note}`);
   out("");
   out(`  Use ${adapter.displayName} normally. Nothing else to do.`);
   out("");
@@ -442,57 +450,55 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
   const config = await fetchConfig(serverUrl(credential), credential.token);
   const route = adapter.protocol === "none" || noRoute ? null : chooseRoute(config, adapter);
 
-  const env: NodeJS.ProcessEnv = { ...process.env };
   const extraArgs: string[] = [];
-  let plan: LaunchPlan = { command: adapter.id, env: {} };
   let auth = "none";
 
-  if (route) {
-    const base: RouteConfig = {
-      url: route.url,
-      minerToken: credential.token,
-      label: route.label,
-      providerFamily: route.providerFamily,
-      surface: route.surface,
-    };
-    let launch: RouteConfig = base;
-    auth = "your Claude login (route session unavailable) — USAGE still swaps in your provider's credential, but /status cannot show it";
-
-    // A route session (M16C0): only for a connected provider route, only when
-    // the server can mint one. The token lives in this object and the child's
-    // environment, and expires on its own.
-    if ((adapter.id === "claude-code" || adapter.id === "codex") && route.kind === "provider" && route.connectionId && config.routeSessions?.available) {
+  // A route session (M16C0): only for a connected provider route, only when
+  // the server can mint one. The token lives in this object and the child's
+  // environment, and expires on its own. For Claude Code it is REQUIRED: with
+  // no session there is no routing at all (see launch.ts).
+  let sessionOutcome: RouteSessionOutcome = { status: "not_attempted" };
+  if (route && wantsRouteSession(adapter.id, route)) {
+    if (!config.routeSessions?.available) {
+      sessionOutcome = { status: "unavailable" };
+    } else {
       try {
         const session: RouteSession = await createRouteSession(serverUrl(credential), credential.token, {
           tool: adapter.id,
-          connectionId: route.connectionId,
+          connectionId: route.connectionId!,
           surface: route.surface,
         });
         if (adapter.id === "codex") {
           // Codex needs no isolated profile: its provider comes from `-c`
           // overrides for this invocation, and its own login is never read.
-          launch = { ...base, session: { token: session.token, expiresAt: session.expiresAt } };
+          sessionOutcome = { status: "created", token: session.token, expiresAt: session.expiresAt };
           auth = "USAGE route session · routing only, bound to this connection · renewed while this window runs";
         } else {
           const profile = await prepareUsageClaudeProfile();
-          launch = { ...base, session: { token: session.token, expiresAt: session.expiresAt, profileDir: profile.dir } };
+          sessionOutcome = { status: "created", token: session.token, expiresAt: session.expiresAt, profileDir: profile.dir };
           auth = "USAGE route session · renewed while this window runs · your Claude login is not used or changed" +
             (profile.unshared.length ? ` · not shared: ${profile.unshared.join(", ")}` : "");
           if (profile.removedSavedLogin) auth += " · a login saved inside the USAGE profile was removed";
         }
       } catch (error) {
-        auth = `your Claude login (route session failed: ${(error as Error).message}) — /status cannot show the route as proven`;
+        sessionOutcome = { status: "failed", reason: `route session failed: ${(error as Error).message}` };
       }
     }
-
-    // The adapter decides what the child needs. The credential exists only in
-    // this environment object and in the child's process environment; nothing
-    // is written to disk, and both die when the tool exits.
-    plan = adapter.launchPlan(launch);
-    Object.assign(env, plan.env);
-  } else {
-    plan = adapter.launchPlan({ url: "", minerToken: "", label: "" });
   }
+  if (route && adapter.id === "codex" && sessionOutcome.status !== "created") {
+    auth = "this device's USAGE credential (no route session)";
+  }
+
+  const decision = decideLaunch({ toolId: adapter.id, route, minerToken: credential.token, session: sessionOutcome });
+
+  // The adapter decides what the child needs. In a verified route the session
+  // credential exists only in this environment object and in the child's
+  // process environment; nothing is written to disk, and both die when the
+  // tool exits. Track only hands the adapter nothing to route with.
+  const plan: LaunchPlan = adapter.launchPlan(decision.routeConfig ?? { url: "", minerToken: "", label: "" });
+  // What spawn() receives, with inherited subscription credentials removed from
+  // a verified Claude route (launch.ts childEnvironment).
+  const env = childEnvironment(adapter.id, process.env, plan.env);
 
   // Metering, when the user opted this tool in. The receiver gets its own
   // per-session secret; the miner credential is nowhere in the tool's
@@ -524,10 +530,11 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
   }
 
   out("");
-  out(`  Starting ${adapter.displayName} with USAGE.`);
-  if (route) {
+  if (decision.mode === "verified_route" && route) {
     // Exactly what this launch will do, resolved seconds ago. No secrets.
-    out(`  Selected route:  ${route.label}${route.kind === "provider" ? " — your connected provider" : " — USAGE gateway (fallback)"}`);
+    out(`  Mining: starting ${adapter.displayName} through a verified USAGE route.`);
+    out(`  Selected route:  ${route.label} — your connected provider`);
+    out(`  Verification:    VERIFIED ROUTE`);
     out(`  Reward:          ${route.rewardStatus.toUpperCase()} — ${route.reason}`);
     out(`  Wire protocol:   ${route.surfaceLabel}`);
     out(`  Auth:            ${auth}`);
@@ -536,7 +543,17 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
       out("  and the credential line must read 'Auth token: ANTHROPIC_AUTH_TOKEN' — not a claude.ai account.");
     }
   } else {
-    out("  Routing:  none (no connected provider for this tool)");
+    out(`  Tracking: starting ${adapter.displayName} with its own sign-in (Track only).`);
+    if (decision.notRoutedReason) {
+      out(`  ${notRoutedLine(adapter.displayName, decision.notRoutedReason)}`);
+    } else if (noRoute) {
+      out(`  Routing: not used — Track only was chosen. ${adapter.displayName} talks to ${directProviderLabel(adapter.id)} directly.`);
+    } else {
+      out(`  Routing: not used — no connected provider route for this tool. ${adapter.displayName} talks to ${directProviderLabel(adapter.id)} directly.`);
+    }
+    out("  Verification:    LOCAL ONLY");
+    out("  Reward:          NOT ELIGIBLE");
+    out(`  ${TRACK_ONLY_EXPLANATION}`);
   }
   out(`  Metering: ${session ? "on — usage is tracked from the tool's own telemetry" : mapped ? "unavailable for this tool" : "off — enable it with: usage map " + adapter.id}`);
   out("  Session only — no credential is written to disk.");
@@ -588,7 +605,8 @@ function help(): void {
     usage enable <tool>        route a tool through USAGE  (--force to override)
     usage disable <tool>       put the tool's configuration back
     usage run <tool> [args]    start a tool with USAGE for this session only
-                               (--no-route: meter from telemetry, do not route)
+                               (--no-route: Track only — own sign-in, local
+                               telemetry, does not earn)
     usage map <tool>           allow USAGE to meter this tool (per-tool opt-in)
     usage unmap <tool>         stop metering this tool
     usage sign-out             forget this device's credential

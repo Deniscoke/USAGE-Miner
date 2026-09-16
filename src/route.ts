@@ -15,13 +15,23 @@ import type { LocalToolAdapter } from "./tools/adapter.js";
  *   1. an ELIGIBLE connected route
  *   2. a HELD connected route, only when nothing eligible exists
  *   3. INELIGIBLE / UNAVAILABLE routes are never chosen over either
- *   4. the USAGE-funded fallback only when NO connected route can carry the tool
+ *   4. otherwise NO route. There is no USAGE-funded fallback any more.
+ *
+ * WHY THERE IS NO FALLBACK (0.4.7). The old fallback sent Claude Code to USAGE's
+ * own gateway with only a header added, so Claude Code kept the user's
+ * claude.ai subscription token in `Authorization` and carried it to USAGE. A
+ * consumer subscription credential (Claude Pro/Max, ChatGPT and the like) must
+ * never travel toward a USAGE route. A server that still advertises
+ * `tools[tool].fallback` is ignored: nothing reads the field. With no route the
+ * tool starts on its own sign-in, talking to its own provider, and USAGE only
+ * tracks it locally ("Track only"), which does not earn.
  */
 
 export type RewardStatus = "eligible" | "held" | "ineligible" | "unavailable";
 
 export interface ChosenRoute {
-  kind: "provider" | "usage_gateway";
+  /** Always a connected provider route. The USAGE gateway fallback no longer exists. */
+  kind: "provider";
   connectionId: string | null;
   url: string;
   label: string;
@@ -32,7 +42,6 @@ export interface ChosenRoute {
   surfaceLabel: string;
   rewardStatus: RewardStatus;
   reason: string;
-  note?: string;
 }
 
 function rewardOf(route: MinerRoute): RewardStatus {
@@ -62,20 +71,6 @@ export function chooseRoute(config: MinerConfig, adapter: Pick<LocalToolAdapter,
     };
   }
 
-  if (tool.fallback) {
-    return {
-      kind: "usage_gateway",
-      connectionId: null,
-      url: tool.fallback.url,
-      label: tool.fallback.label,
-      providerFamily: null,
-      surface: adapter.protocol,
-      surfaceLabel: adapter.protocol === "anthropic_compatible" ? "Anthropic-compatible" : "OpenAI-compatible",
-      rewardStatus: "held",
-      reason: tool.fallback.note,
-      note: tool.fallback.note,
-    };
-  }
-
+  // `tool.fallback` is deliberately never read. See rule 4 above.
   return null;
 }

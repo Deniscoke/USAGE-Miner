@@ -15,18 +15,25 @@ import {
 /**
  * Claude Code.
  *
- * Configured through `~/.claude/settings.json`, which supports an `env` block
- * that Claude Code applies to its own sessions. Two keys are all that is
- * needed, and they are exactly the ones USAGE has been routing production
- * traffic with since M4:
+ * TWO MODES, NOTHING IN BETWEEN (0.4.7).
  *
- *   ANTHROPIC_BASE_URL       where requests go
- *   ANTHROPIC_CUSTOM_HEADERS carries the device's miner token
+ *   VERIFIED ROUTE  a USAGE route session exists: Claude Code starts in an
+ *                   isolated profile with no saved login, authenticates to the
+ *                   USAGE route with the short-lived `usgr_` session token, and
+ *                   USAGE uses the server-held provider credential.
+ *   TRACK ONLY      anything else: Claude Code starts exactly as the user would
+ *                   start it, on its own sign-in, talking to its own provider.
+ *                   No USAGE routing variable is set. USAGE only tracks it
+ *                   from local telemetry, and that does not earn.
  *
- * ANTHROPIC_AUTH_TOKEN is deliberately NOT set. Setting it would overwrite the
- * Authorization header and log the user out of their Claude subscription; the
- * miner token travels in its own header instead, so nobody has to sign out of
- * anything.
+ * A consumer subscription credential (a claude.ai Pro/Max login) is never
+ * carried toward a USAGE route. Earlier builds had a third, "header-only" launch
+ * that pointed ANTHROPIC_BASE_URL at USAGE while Claude Code kept the user's
+ * OAuth token in Authorization; that relay is gone.
+ *
+ * Earlier builds (before 0.3.0) also routed through `~/.claude/settings.json`
+ * with ANTHROPIC_BASE_URL and an ANTHROPIC_CUSTOM_HEADERS miner-token header.
+ * That header is still how a leftover configuration is recognised and removed.
  *
  * LAUNCH-ONLY, AND WHY. Claude Code's settings file takes literal environment
  * values. It has no way to name a credential held somewhere else, the way
@@ -159,8 +166,15 @@ export const claudeCodeAdapter: LocalToolAdapter = {
    * needs, and carry account attributes it does not want). OTLP over HTTP as
    * JSON, which the receiver parses without a protobuf dependency.
    *
-   * The three content switches are set to 0 explicitly, not left to default:
-   * a default is a thing that changes in a release note.
+   * All five content switches are set to 0 explicitly, not left to default:
+   * a default is a thing that changes in a release note, and
+   * OTEL_LOG_ASSISTANT_RESPONSES falls back to OTEL_LOG_USER_PROMPTS when
+   * unset. CLAUDE_CODE_ENHANCED_TELEMETRY_BETA is never set, so no traces.
+   *
+   * Used in BOTH launch modes. Even with every switch off, the request event
+   * carries identity (user.email, organization.id, account ids) and names
+   * (skill.name, mcp_server.name, ...); those are dropped by the allowlist in
+   * telemetry/mappings.ts before anything is buffered or uploaded.
    */
   telemetryLaunch(receiver) {
     return {
@@ -205,12 +219,13 @@ export const claudeCodeAdapter: LocalToolAdapter = {
    * OpenRouter's Anthropic surface requires them (docs, 2026-09-11) and they
    * are the ids USAGE's pricing snapshot names.
    *
-   * WITHOUT ONE (server too old, or route sessions unavailable): the header-
-   * only launch. Claude Code then authenticates to USAGE with the device
-   * credential in its own header and keeps its claude.ai login in
-   * Authorization; USAGE strips that and uses the server-held provider
-   * credential, but `/status` cannot show the route as proven. The miner says
-   * which of the two it is doing before launching.
+   * WITHOUT ONE (no route, server too old, route sessions unavailable, or
+   * creating one failed): NOT ROUTED. Claude Code is started with no USAGE
+   * variable at all -- no ANTHROPIC_BASE_URL, ANTHROPIC_CUSTOM_HEADERS,
+   * ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY -- so it uses its own sign-in
+   * against its own provider, and the user's subscription credential never
+   * reaches USAGE. The device's miner token is not used here either. The
+   * launcher says which of the two modes it is using before launching.
    */
   launchPlan(route: RouteConfig) {
     // A Claude route session always comes with its isolated profile; without
@@ -226,14 +241,8 @@ export const claudeCodeAdapter: LocalToolAdapter = {
       if (route.providerFamily === "openrouter") Object.assign(env, OPENROUTER_MODEL_ENV);
       return { command: "claude", env };
     }
-    return {
-      command: "claude",
-      env: {
-        ANTHROPIC_BASE_URL: route.url,
-        ANTHROPIC_API_KEY: "",
-        ANTHROPIC_CUSTOM_HEADERS: `${HEADER_NAME}: ${route.minerToken}`,
-      },
-    };
+    // Track only: Claude Code exactly as the user would start it.
+    return { command: "claude", env: {} };
   },
 
   /**

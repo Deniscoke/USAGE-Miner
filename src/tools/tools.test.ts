@@ -97,16 +97,20 @@ describe("Claude Code adapter", () => {
     expect(await readClaudeSettings()).toEqual({ model: "opus" });
   });
 
-  it("puts routing in the child process environment, not in a file", async () => {
+  it("without a route session starts Claude Code untouched: no USAGE variable at all", async () => {
+    // The header-only launch pointed Claude Code at USAGE while it kept the
+    // user's claude.ai OAuth token in Authorization. That relay is gone.
     const plan = claudeCodeAdapter.launchPlan(ROUTE);
 
     expect(plan.command).toBe("claude");
-    expect(plan.env.ANTHROPIC_BASE_URL).toBe(ROUTE.url);
-    expect(plan.env.ANTHROPIC_CUSTOM_HEADERS).toContain(ROUTE.minerToken);
-    // Empty, so a signed-in Claude subscription keeps working.
-    expect(plan.env.ANTHROPIC_API_KEY).toBe("");
-    // Never set: it would replace the user's own Authorization header.
-    expect(plan.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(plan.env).toEqual({});
+    for (const key of ["ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]) {
+      expect(plan.env[key], key).toBeUndefined();
+    }
+    expect(JSON.stringify(plan)).not.toContain(ROUTE.minerToken);
+    // A session without its isolated profile is not used either.
+    const noProfile = claudeCodeAdapter.launchPlan({ ...ROUTE, session: { token: "usgr_x", expiresAt: "2026-09-17T08:00:00Z" } });
+    expect(noProfile.env).toEqual({});
 
     // Nothing was written anywhere as a side effect of planning a launch.
     await expect(readFile(claudeSettingsPath(), "utf8")).rejects.toThrow();
@@ -154,10 +158,11 @@ describe("where the miner token does and does not land", () => {
     await claudeCodeAdapter.enableMining(ROUTE);
     await expect(readFile(claudeSettingsPath(), "utf8")).rejects.toThrow();
 
-    // And the credential the launcher passes never reaches a config file --
+    // And the route session the launcher passes never reaches a config file --
     // it exists only in the environment handed to the child process.
-    const plan = claudeCodeAdapter.launchPlan(ROUTE);
-    expect(JSON.stringify(plan.env)).toContain(ROUTE.minerToken);
+    const plan = claudeCodeAdapter.launchPlan({ ...ROUTE, session: { token: "usgr_session_value", expiresAt: "2026-09-17T08:00:00Z", profileDir: path.join(home, "profile") } });
+    expect(JSON.stringify(plan.env)).toContain("usgr_session_value");
+    expect(JSON.stringify(plan.env)).not.toContain(ROUTE.minerToken);
     await expect(readFile(claudeSettingsPath(), "utf8")).rejects.toThrow();
   });
 });

@@ -165,7 +165,12 @@ export interface RouteSession {
 export interface MinerToolConfig {
   protocol: string;
   routes: MinerRoute[];
-  fallback: { label: string; url: string; miningEligibility: string; note: string } | null;
+  /**
+   * Sent by servers before 0.4.7's policy change. Accepted so an old server's
+   * config still parses, and NEVER READ: a USAGE-funded fallback carried the
+   * user's consumer subscription credential toward USAGE. See route.ts.
+   */
+  fallback?: { label: string; url: string; miningEligibility: string; note: string } | null;
 }
 
 export interface ServerMapping {

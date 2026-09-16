@@ -51,6 +51,15 @@ is not used, moved or changed; inside the session, `/status` shows the USAGE
 route and `Auth token: ANTHROPIC_AUTH_TOKEN`. Your OpenRouter connection is
 offered to Claude Code on OpenRouter's Anthropic-compatible surface.
 
+Since 0.4.7 there are exactly two ways Claude Code starts. With a connected
+provider route **and** a route session, it is a **verified route** and can earn.
+Otherwise it is **Track only**: Claude Code starts on your own sign-in, talks to
+Anthropic directly with no USAGE routing variable set, and USAGE measures it from
+local telemetry on this PC. That is **local only** and does **not earn**. Your
+Claude Pro/Max (or any other consumer subscription) credential is never carried
+toward a USAGE route; earlier builds' "header-only" launch and the USAGE gateway
+fallback are gone.
+
 **Configured.** The tool's own config file is edited, and may only *name* a
 credential rather than contain one. **Codex** can do this
 (`env_key = "USAGE_MINER_TOKEN"`).

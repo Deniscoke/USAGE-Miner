@@ -25,6 +25,7 @@ import { VERSION } from "./version.js";
 import { renderApp } from "./ui-page.js";
 import { migrateInsecureConfig } from "./migrate.js";
 import { chooseRoute, type ChosenRoute } from "./route.js";
+import { launchViewFor, TRACK_ONLY_EXPLANATION, type ToolLaunchView } from "./launch.js";
 
 /**
  * The desktop window.
@@ -78,6 +79,12 @@ interface ToolView {
   };
   /** Reward status for usage from this tool on the current route, in words. */
   reward: { status: "eligible" | "held" | "ineligible" | "none"; reason: string };
+  /**
+   * How "start" would run this tool: a VERIFIED ROUTE, or TRACK ONLY on the
+   * tool's own sign-in. Null until USAGE has answered (signed out, offline) or
+   * when the tool cannot be metered here.
+   */
+  launch: ToolLaunchView | null;
   meterable: boolean;
   availabilityNote: string | null;
   verificationCeiling: string;
@@ -88,8 +95,12 @@ interface ToolView {
 }
 
 export interface AiRoute {
-  /** "provider": the user's own connection; "usage_gateway": USAGE's fallback; "none": nothing. */
-  kind: "provider" | "usage_gateway" | "none";
+  /**
+   * "provider": Claude Code starts through a verified route on the user's own
+   * connection. "none": it starts on its own sign-in (Track only). There is no
+   * USAGE gateway fallback.
+   */
+  kind: "provider" | "none";
   label: string;
   rewardStatus: "eligible" | "held" | "ineligible" | "none";
   reason: string;
@@ -184,6 +195,7 @@ async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
     mappingStatus: "unknown",
     tracking: { active: false, lastEventAt: null, lastSyncAt: null, lastSyncOutcome: null, lastSyncLabel: null, buffered: 0 },
     reward: { status: "none", reason: "" },
+    launch: null,
     meterable: !capabilities.meteringMethods.includes("unsupported"),
     availabilityNote: capabilities.availabilityNote,
     verificationCeiling: capabilities.verificationCeiling,
@@ -335,12 +347,17 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
   }
 
   // The route Claude Code would take from here, and what that means for
-  // reward. "No provider connected" and "traffic goes through USAGE's own
-  // gateway" are both true at once; the window says both.
+  // reward. Without a verified route Claude Code runs on its own sign-in and
+  // is tracked locally; it is never carried through USAGE on that sign-in.
+  const sessionsAvailable = config.routeSessions?.available === true;
   const claude = ADAPTERS.find((a) => a.id === "claude-code");
   const chosen = claude ? chooseRoute(config, claude) : null;
-  state.route = describeRoute(config, chosen);
-  for (const tool of state.tools) tool.reward = rewardFor(tool, state.route);
+  state.route = describeRoute(chosen, sessionsAvailable);
+  for (const tool of state.tools) {
+    const adapter = ADAPTERS.find((a) => a.id === tool.id);
+    tool.launch = adapter && tool.meterable ? launchViewFor(tool.id, chooseRoute(config, adapter), sessionsAvailable) : null;
+    tool.reward = rewardFor(tool);
+  }
   state.whyNotEarning = whyNotEarning(state);
   state.providers = config.routes.map((route) => ({
     label: route.label,
@@ -351,7 +368,7 @@ export async function buildState(pairing: AppState["pairing"] = null): Promise<A
   // window's own reading of a connection list.
   state.setup = buildSetup({
     signedIn: true,
-    eligibleProvider: state.route?.kind === "provider" && state.route.rewardStatus === "eligible",
+    eligibleProvider: chosen?.rewardStatus === "eligible",
     anyProvider: config.routes.length > 0,
     meterableToolInstalled: state.tools.some((tool) => tool.installed && tool.meterable),
     unmeterableInstalled: state.tools.filter((tool) => tool.installed && !tool.meterable).map((tool) => tool.name),
@@ -402,51 +419,56 @@ async function applyTrackingStatus(state: AppState, deviceId: string): Promise<v
   }
 }
 
-function describeRoute(config: MinerConfig, chosen: ChosenRoute | null): AiRoute {
+function describeRoute(chosen: ChosenRoute | null, sessionsAvailable: boolean): AiRoute {
   if (!chosen) {
-    return { kind: "none", label: "No route", rewardStatus: "none", reason: "No AI route is available for Claude Code.", wire: null, claudeCompatible: false, auth: null };
-  }
-  if (chosen.kind === "provider") {
-    // The SERVER's economic verdict. `eligible_route` alone is route
-    // capability (routable, measurable, priced), never a reward.
-    const sessions = config.routeSessions?.available === true;
     return {
-      kind: "provider",
-      label: chosen.label,
-      rewardStatus: chosen.rewardStatus === "unavailable" ? "none" : chosen.rewardStatus,
-      reason: chosen.reason,
-      wire: chosen.surfaceLabel,
-      claudeCompatible: chosen.surface === "anthropic_compatible",
-      auth: sessions
-        ? "USAGE route session (short-lived, this route only) — your Claude login is not used"
-        : "your Claude login (route sessions unavailable on this server)",
+      kind: "none",
+      label: "No route",
+      rewardStatus: "none",
+      reason: "No eligible paid AI route is connected. Claude Code runs on its own sign-in (Track only), which does not earn.",
+      wire: null,
+      claudeCompatible: false,
+      auth: null,
     };
   }
+  if (!sessionsAvailable) {
+    // A connected route alone is not enough: without a route session Claude
+    // Code would carry its own claude.ai login, so it is not routed at all.
+    return {
+      kind: "none",
+      label: chosen.label,
+      rewardStatus: "none",
+      reason: "USAGE cannot start a verified route session right now, so Claude Code runs on its own sign-in (Track only), which does not earn.",
+      wire: null,
+      claudeCompatible: false,
+      auth: null,
+    };
+  }
+  // The SERVER's economic verdict. `eligible_route` alone is route capability
+  // (routable, measurable, priced), never a reward.
   return {
-    kind: "usage_gateway",
+    kind: "provider",
     label: chosen.label,
-    rewardStatus: "held",
-    reason: chosen.note ?? "USAGE-funded gateway credits are not reward eligible.",
+    rewardStatus: chosen.rewardStatus === "unavailable" ? "none" : chosen.rewardStatus,
+    reason: chosen.reason,
     wire: chosen.surfaceLabel,
-    claudeCompatible: false,
-    auth: "your Claude login, carried through USAGE's own gateway",
+    claudeCompatible: chosen.surface === "anthropic_compatible",
+    auth: "USAGE route session (short-lived, this route only) — your Claude login is not used",
   };
 }
 
-function rewardFor(tool: ToolView, route: AiRoute | null): ToolView["reward"] {
+function rewardFor(tool: ToolView): ToolView["reward"] {
   if (!tool.meterable) return { status: "none", reason: "Not metered here." };
   if (tool.verificationCeiling === "local_observed" || tool.verificationCeiling === "device_attested") {
     return { status: "ineligible", reason: "Local telemetry alone is tracked, never rewarded." };
   }
-  if (!route || route.kind === "none") return { status: "held", reason: "No eligible paid AI route is connected." };
-  return { status: route.rewardStatus, reason: route.reason };
+  if (!tool.launch || tool.launch.mode === "track_only") return { status: "ineligible", reason: TRACK_ONLY_EXPLANATION };
+  return { status: tool.launch.reward === "ELIGIBLE" ? "eligible" : "held", reason: tool.launch.route };
 }
 
 function whyNotEarning(state: AppState): string | null {
   if (state.route?.rewardStatus === "eligible") return null;
-  if (!state.route || state.route.kind === "none") return "No eligible paid AI route is connected.";
-  if (state.route.kind === "usage_gateway") return "Claude Code runs through USAGE's own gateway, whose credits are not reward eligible. Connect your own provider to earn.";
-  return state.route.reason;
+  return state.route?.reason ?? "No eligible paid AI route is connected.";
 }
 
 
@@ -658,7 +680,7 @@ export async function startDesktop(): Promise<DesktopHandle> {
           tool: adapter.id,
           outcome: result.ok ? "ok" : "config_conflict",
         });
-        json(response, { ...result, note: route.note });
+        json(response, result);
         return;
       }
 
@@ -678,30 +700,32 @@ export async function startDesktop(): Promise<DesktopHandle> {
         const credential = await loadCredential();
         if (!credential) return json(response, { error: "not_signed_in" }, 401);
 
+        if (adapter.capabilities().meteringMethods.includes("unsupported")) {
+          return json(response, { error: "not_meterable", message: adapter.capabilities().availabilityNote }, 400);
+        }
+
         // Resolved FRESH for the click, never from the page's stale copy; the
         // launcher resolves again immediately before the spawn.
         invalidateConfigCache();
         const config = await currentConfig(credential);
         const route = chooseRoute(config, adapter);
-        if (!route) {
-          return json(
-            response,
-            { error: "no_provider", message: "Connect an AI provider first." },
-            400,
-          );
-        }
+        const view = launchViewFor(adapter.id, route, config.routeSessions?.available === true);
+
+        // TRACK ONLY when asked for, and whenever there is no verified route:
+        // the tool keeps its own provider and sign-in, and USAGE adds
+        // telemetry only. No route never means "route anyway".
+        const trackOnly = body.route === false || view.mode === "track_only" || !route;
         await logEvent({
           event: "launch_route",
           tool: adapter.id,
           outcome: "ok",
-          detail: `${route.label} · ${route.surfaceLabel} · ${route.kind} · reward ${route.rewardStatus}`,
+          detail: trackOnly || !route
+            ? "track_only"
+            : `${route.label} · ${route.surfaceLabel} · verified_route · reward ${route.rewardStatus}`,
         });
 
         // Through the miner's own executable, so the child is started by the
         // same tested launcher the CLI uses rather than a second copy of it.
-        // `route: false` is MAPPING MODE: the tool keeps its own provider and
-        // sign-in, and USAGE adds telemetry only.
-        const trackOnly = body.route === false;
         spawn(
           "cmd",
           ["/c", "start", `${adapter.displayName} — USAGE${trackOnly ? " Tracking" : " Mining"}`, process.execPath, "run", adapter.id, ...(trackOnly ? ["--no-route"] : [])],
@@ -709,14 +733,9 @@ export async function startDesktop(): Promise<DesktopHandle> {
         ).unref();
 
         await logEvent({ event: "launch", tool: adapter.id, outcome: "ok" });
-        json(response, {
-          ok: true,
-          label: route.label,
-          note: route.note,
-          rewardStatus: trackOnly ? "ineligible" : route.rewardStatus,
-          wire: route.surfaceLabel,
-          kind: route.kind,
-        });
+        json(response, trackOnly || !route
+          ? { ok: true, mode: "track_only", label: launchViewFor(adapter.id, null, false).route, rewardStatus: "ineligible", reward: "NOT ELIGIBLE", wire: null }
+          : { ok: true, mode: "verified_route", label: route.label, rewardStatus: route.rewardStatus, reward: view.reward, wire: route.surfaceLabel });
         return;
       }
 

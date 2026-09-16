@@ -104,11 +104,10 @@ describe("the route-session launch plan", () => {
     expect(Object.values(plan.env).join(" ")).not.toMatch(/sk-or|sk-ant/);
   });
 
-  it("keeps the header-only launch when there is no route session", () => {
+  it("does not route at all when there is no route session: no header-only launch", () => {
     const plan = claudeCodeAdapter.launchPlan(base);
-    expect(plan.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-    expect(plan.env.CLAUDE_CONFIG_DIR).toBeUndefined();
-    expect(plan.env.ANTHROPIC_CUSTOM_HEADERS).toContain("usgm_device");
+    expect(plan).toEqual({ command: "claude", env: {} });
+    expect(JSON.stringify(plan)).not.toContain("usgm_device");
   });
 
   it("sets no OpenRouter model slugs for a non-OpenRouter route", () => {

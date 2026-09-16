@@ -67,11 +67,20 @@ describe("chooseRoute", () => {
     expect(chosen.rewardStatus).toBe("held");
   });
 
-  it("ineligible and unavailable routes are never chosen; the fallback is explicit and HELD", () => {
-    const chosen = chooseRoute(config([route({ label: "Free", rewardStatus: "ineligible" }), route({ label: "Dead", rewardStatus: "unavailable" })]), CLAUDE)!;
-    expect(chosen.kind).toBe("usage_gateway");
-    expect(chosen.rewardStatus).toBe("held");
-    expect(chosen.label).toBe("USAGE gateway");
+  it("ineligible and unavailable routes are never chosen, and an advertised fallback is never used instead", () => {
+    const chosen = chooseRoute(config([route({ label: "Free", rewardStatus: "ineligible" }), route({ label: "Dead", rewardStatus: "unavailable" })]), CLAUDE);
+    expect(chosen).toBeNull();
+  });
+
+  it("a server that still advertises a claude-code fallback, with no routes, yields no route at all", () => {
+    // The fallback carried the user's claude.ai subscription token toward
+    // USAGE. It is ignored whatever the server says.
+    const cfg = config([], true);
+    expect(cfg.tools["claude-code"].fallback).not.toBeNull();
+    expect(chooseRoute(cfg, CLAUDE)).toBeNull();
+    // And for Codex, too, if a server ever advertised one.
+    cfg.tools.codex.fallback = { label: "USAGE gateway", url: "https://usage.example/api/gateway/openai", miningEligibility: "held", note: "x" };
+    expect(chooseRoute(cfg, CODEX)).toBeNull();
   });
 
   it("with no eligible OpenRouter and no fallback there is no route at all", () => {

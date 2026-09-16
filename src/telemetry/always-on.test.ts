@@ -51,6 +51,9 @@ describe("the environment written for Claude Code", () => {
     for (const key of ["OTEL_LOG_USER_PROMPTS", "OTEL_LOG_ASSISTANT_RESPONSES", "OTEL_LOG_TOOL_DETAILS", "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_RAW_API_BODIES"]) {
       expect(env[key], key).toBe("0");
     }
+    expect(env.CLAUDE_CODE_ENABLE_TELEMETRY).toBe("1");
+    // Never traces, never the enhanced-telemetry beta.
+    expect(env.CLAUDE_CODE_ENHANCED_TELEMETRY_BETA).toBeUndefined();
   });
 
   it("carries no USAGE credential of any kind", () => {
@@ -241,6 +244,136 @@ describe("the always-on service, end to end", () => {
     await disableAlwaysOn();
     await service.refresh();
     expect(service.state().listening).toBe("off");
+  }, 30_000);
+});
+
+describe("content and identity never reach the buffer or the upload", () => {
+  it("drops prompts, responses, tool content, account identity and skill/MCP/plugin names from real Claude Code records", async () => {
+    const { createAlwaysOnService } = await import("./always-on-service.js");
+    const { pending } = await import("./buffer.js");
+    const { OBSERVATION_FIELDS } = await import("./observation.js");
+    const { generateKeyPairSync, sign } = await import("node:crypto");
+    await enableAlwaysOn();
+
+    // Everything Claude Code can put on a record, per its monitoring docs, that
+    // is not compute metadata -- including what it sends with every content
+    // switch off (user.email, organization.id, account ids, skill.name, ...).
+    const CONTENT: Record<string, string> = {
+      prompt: "SECRET PROMPT refactor auth, password hunter2",
+      user_prompt: "SECRET USER PROMPT text",
+      body: "SECRET RAW BODY {\"messages\":[]}",
+      tool_input: "SECRET TOOL INPUT rm -rf ~/.ssh",
+      tool_parameters: "SECRET TOOL PARAMETERS C:\\\\Users\\\\denis\\\\project",
+      response: "SECRET MODEL RESPONSE here is the code",
+      content: "SECRET CONTENT const API_KEY = 1",
+      "user.email": "someone.private@example.com",
+      "user.id": "SECRET-user-id-hash",
+      "organization.id": "SECRET-org-7f3a",
+      "user.account_uuid": "SECRET-account-uuid-1",
+      "user.account_id": "SECRET-account-id-2",
+      "session.id": "SECRET-session-id-3",
+      "skill.name": "SECRET-my-private-skill",
+      "agent.name": "SECRET-my-agent",
+      "plugin.name": "SECRET-my-plugin",
+      "marketplace.name": "SECRET-my-marketplace",
+      "mcp_server.name": "SECRET-internal-mcp-server",
+      "mcp_tool.name": "SECRET-internal-mcp-tool",
+      "vcs.repository.url": "https://github.com/SECRET/private-repo",
+      "vcs.branch": "SECRET-feature-branch",
+    };
+    const attr = (k: string, v: string | number) => ({ key: k, value: typeof v === "number" ? { intValue: v } : { stringValue: v } });
+    const time = String(Date.now()) + "000000";
+    const exportBody = {
+      resourceLogs: [{
+        resource: { attributes: [attr("service.name", "claude-code"), attr("user.email", CONTENT["user.email"])] },
+        scopeLogs: [{
+          scope: { name: "com.anthropic.claude_code.events" },
+          logRecords: [
+            {
+              timeUnixNano: time,
+              body: { stringValue: CONTENT.user_prompt },
+              attributes: [attr("event.name", "user_prompt"), attr("prompt", CONTENT.prompt), attr("prompt_length", 42), attr("input_tokens", 7), attr("output_tokens", 7)],
+            },
+            {
+              timeUnixNano: time,
+              body: { stringValue: CONTENT.body },
+              attributes: [
+                attr("event.name", "claude_code.api_request"),
+                ...Object.entries(CONTENT).map(([k, v]) => attr(k, v)),
+                attr("model", "claude-sonnet-5"),
+                attr("input_tokens", 1500),
+                attr("output_tokens", 240),
+                attr("cache_read_tokens", 800),
+                attr("cache_creation_tokens", 100),
+                attr("duration_ms", 1234),
+                attr("request_id", "req_privacy_1"),
+              ],
+            },
+          ],
+        }],
+      }],
+    };
+
+    const pair = generateKeyPairSync("ed25519");
+    const uploads: unknown[] = [];
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const port = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+
+    let signedIn = false;
+    const service = createAlwaysOnService({
+      port,
+      loadCredential: async () => (signedIn ? { token: "usgm_test", deviceId: "device-1", deviceName: "PC", serverUrl: "https://usage.invalid" } : null),
+      loadDeviceKey: async () => ({
+        publicKey: pair.publicKey.export({ type: "spki", format: "der" }).toString("base64"),
+        sign: (payload: string) => sign(null, Buffer.from(payload), pair.privateKey).toString("base64"),
+      }),
+      upload: async (_url, _token, batch) => {
+        uploads.push(...batch);
+        return { accepted: batch.length, duplicate: 0, rejected: 0 };
+      },
+    });
+    await service.refresh();
+    const key = (await alwaysOnStatus()).receiverKey!;
+    const post = () => fetch("http://127.0.0.1:" + port + "/v1/logs", {
+      method: "POST",
+      headers: { "content-type": "application/json", [ALWAYS_ON_HEADER]: key },
+      body: JSON.stringify(exportBody),
+    });
+
+    const assertClean = (value: unknown) => {
+      const text = JSON.stringify(value);
+      for (const [name, secret] of Object.entries(CONTENT)) expect(text, name).not.toContain(secret);
+      expect(text).not.toContain("SECRET");
+    };
+
+    try {
+      // Signed out: the observation goes to the offline buffer.
+      expect((await post()).status).toBe(200);
+      await service.idle();
+      const buffered = await pending();
+      expect(buffered).toHaveLength(1);
+      expect(Object.keys(buffered[0]).sort()).toEqual([...OBSERVATION_FIELDS].sort());
+      expect(buffered[0].upstreamRequestId).toBe("req_privacy_1");
+      expect(buffered[0].cacheReadTokens).toBe(800);
+      expect(buffered[0].cacheWriteTokens).toBe(100);
+      assertClean(buffered);
+
+      // Signed in: the same kind of record goes to the upload payload.
+      signedIn = true;
+      expect((await post()).status).toBe(200);
+      await service.idle();
+      expect(uploads.length).toBeGreaterThanOrEqual(1);
+      for (const item of uploads as { observation: Record<string, unknown> }[]) {
+        expect(Object.keys(item.observation).sort()).toEqual([...OBSERVATION_FIELDS].sort());
+      }
+      expect(JSON.stringify(uploads)).toContain("req_privacy_1");
+      assertClean(uploads);
+    } finally {
+      await disableAlwaysOn();
+      await service.refresh();
+    }
   }, 30_000);
 });
 

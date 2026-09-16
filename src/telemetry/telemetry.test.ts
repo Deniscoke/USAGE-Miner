@@ -362,9 +362,14 @@ describe("telemetry launch configuration", () => {
     expect(launch.env.OTEL_EXPORTER_OTLP_PROTOCOL).toBe("http/json");
     expect(launch.env.OTEL_EXPORTER_OTLP_ENDPOINT).toBe(receiver.endpoint);
     expect(launch.env.OTEL_EXPORTER_OTLP_HEADERS).toBe("Authorization=Bearer sess-secret-abc");
-    expect(launch.env.OTEL_LOG_USER_PROMPTS).toBe("0");
-    expect(launch.env.OTEL_LOG_TOOL_DETAILS).toBe("0");
-    expect(launch.env.OTEL_LOG_RAW_API_BODIES).toBe("0");
+    // All five content switches, explicitly. OTEL_LOG_ASSISTANT_RESPONSES falls
+    // back to OTEL_LOG_USER_PROMPTS when unset, so both are stated.
+    for (const key of ["OTEL_LOG_USER_PROMPTS", "OTEL_LOG_ASSISTANT_RESPONSES", "OTEL_LOG_TOOL_DETAILS", "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_RAW_API_BODIES"]) {
+      expect(launch.env[key], key).toBe("0");
+    }
+    // No traces: the enhanced-telemetry beta is never switched on.
+    expect(launch.env.CLAUDE_CODE_ENHANCED_TELEMETRY_BETA).toBeUndefined();
+    expect(launch.env.OTEL_TRACES_EXPORTER).toBe("none");
     // The miner credential is not in the telemetry environment.
     expect(JSON.stringify(launch)).not.toMatch(/usgm_/);
   });
