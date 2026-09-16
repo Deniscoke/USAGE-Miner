@@ -124,6 +124,16 @@ export async function removeLegacyCodexRouting(): Promise<{ removed: boolean }> 
   return { removed: true };
 }
 
+/** Presence only: two facts about a Codex config file, and nothing else. */
+export function scanCodexConfigText(text: string): { logUserPrompt: boolean; conflictingExporter: boolean } {
+  // TOML comments out, so a commented-out example is not mistaken for a setting.
+  const live = text.replace(/#[^\n]*/g, "");
+  return {
+    logUserPrompt: /\blog_user_prompt\s*=\s*true\b/.test(live),
+    conflictingExporter: /otlp-grpc|ca-certificate|client-certificate|client-private-key/.test(live),
+  };
+}
+
 export const codexAdapter: LocalToolAdapter = {
   id: "codex",
   displayName: "Codex",
@@ -161,22 +171,40 @@ export const codexAdapter: LocalToolAdapter = {
 
   privacyProfile() {
     return {
-      reads: ["Token counts (input, output, cached, cache write, reasoning, tool)", "Timing"],
-      neverReads: ["Prompts", "Responses", "Tool arguments and output", "File paths", "Source code"],
+      // `tool_token_count` is a total on this wire and is not read.
+      reads: ["Model", "Token counts (input, output, cached, cache write, reasoning)", "Timing"],
+      neverReads: ["Prompts", "Responses", "Tool arguments and output", "File paths", "Source code", "Your email or account id"],
     };
   },
 
   /**
    * Codex is configured through `-c key=value` overrides, which live for one
    * invocation -- the same session-scoped property the environment gives the
-   * other tools. `log_user_prompt` is set false explicitly; its default is not
-   * documented, and undocumented defaults are not privacy controls.
+   * other tools. Audited against rust-v0.153.3 (docs/COVERAGE.md):
+   *
+   *   * `-c` values are parsed as TOML, falling back to a plain string when
+   *     that fails (utils/cli/src/config_override.rs). The launch goes through
+   *     cmd.exe and the npm shim, which strip the inner quotes, so every string
+   *     here is written to survive as that fallback; `false` stays a boolean.
+   *   * Overrides are applied in order into one layer: a dotted key under a
+   *     string replaces the string with a table (config/src/overrides.rs). An
+   *     earlier `otel.exporter="otlp-http"` was therefore a no-op that only
+   *     worked because of its position, and is gone. The exporter is the
+   *     `otlp-http` table alone: endpoint, protocol, headers.
+   *   * The otlp-http endpoint is used VERBATIM (otel/src/provider.rs; the
+   *     opentelemetry-otlp builder appends /v1/logs only to an env-var
+   *     endpoint), so the path is spelled out.
+   *   * `log_user_prompt` defaults to false in core/src/config/otel.rs and is
+   *     still set false here: a default is not a privacy control. With it
+   *     false, `codex.user_prompt` carries "[REDACTED]".
+   *   * `codex.tool_result` carries full tool `arguments` and an `output`
+   *     preview whatever this says. It is never an accepted event name, and
+   *     the receiver keeps nothing it does not map.
    */
   telemetryLaunch(receiver) {
     return {
       env: {},
       args: [
-        "-c", 'otel.exporter="otlp-http"',
         "-c", `otel.exporter.otlp-http.endpoint="${receiver.endpoint}/v1/logs"`,
         "-c", 'otel.exporter.otlp-http.protocol="json"',
         "-c", `otel.exporter.otlp-http.headers.Authorization="Bearer ${receiver.sessionSecret}"`,
@@ -185,6 +213,47 @@ export const codexAdapter: LocalToolAdapter = {
         "-c", 'otel.trace_exporter="none"',
       ],
     };
+  },
+
+  /**
+   * Presence-only checks of the user's own Codex config, before a tracked
+   * session. `-c` overrides are deep-merged over config.toml, so:
+   *
+   *   * an `otlp-grpc` exporter there would sit beside the session's
+   *     `otlp-http` one -- an enum with two variants, which Codex rejects, so
+   *     Codex would not start at all;
+   *   * TLS settings for an exporter would be merged into the loopback one;
+   *   * `log_user_prompt = true` loses to the session's `false` on the CLI
+   *     layer, but a managed config can sit above that layer, and a prompt
+   *     setting is refused rather than trusted to lose.
+   *
+   * Nothing else in the file is read, kept or logged.
+   */
+  async telemetryPreflight({ env }) {
+    const home = env.CODEX_HOME || path.join(homedir(), ".codex");
+    for (const name of ["config.toml", "managed_config.toml"]) {
+      const file = path.join(home, name);
+      let text: string;
+      try {
+        text = await readFile(file, "utf8");
+      } catch {
+        continue;
+      }
+      const found = scanCodexConfigText(text);
+      if (found.logUserPrompt) {
+        return {
+          ok: false as const,
+          message: `Codex prompt logging is turned on in ${file} (otel.log_user_prompt). USAGE will not track Codex while it is on. Set it to false, then start tracking again.`,
+        };
+      }
+      if (found.conflictingExporter) {
+        return {
+          ok: false as const,
+          message: `${file} already configures an OpenTelemetry exporter that Codex cannot combine with USAGE's local one (otlp-grpc or exporter TLS). Codex would refuse to start, so USAGE will not track it.`,
+        };
+      }
+    }
+    return { ok: true as const };
   },
 
   launchPlan(route: RouteConfig): LaunchPlan {

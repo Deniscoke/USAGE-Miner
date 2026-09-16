@@ -104,6 +104,14 @@ export function renderApp(nonce: string): string {
   .switch { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
   .priv { padding: 8px 0; border-top: 1px solid var(--border); }
   .priv:first-of-type { border-top: 0; }
+  .tool { padding: 12px 0; }
+  .tool + .tool { border-top: 1px solid var(--border); }
+  .tool > .row { padding: 0 0 6px; }
+  .kv { display: grid; grid-template-columns: 128px 1fr; gap: 2px 12px; font-size: 12px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-variant-numeric: tabular-nums; }
+  .kv .v.dim { color: var(--muted); }
+  .kv .v.bad { color: var(--danger); }
 </style>
 </head>
 <body>
@@ -300,7 +308,7 @@ export function renderApp(nonce: string): string {
     var todayHead = el("div", "row");
     todayHead.appendChild(el("h2", null, "Today on this PC"));
     todayHead.appendChild(el("span", "tag " + (anyTracking ? "on" : anyMapped ? "warn" : "off"),
-      anyTracking ? "TRACKING ACTIVE" : anyMapped ? "MAPPED · IDLE" : "NOT MAPPED"));
+      anyTracking ? "TRACKING LIVE" : anyMapped ? "TRACKING READY · IDLE" : "NOT TRACKING"));
     today.appendChild(todayHead);
     if (state.usage) {
       // AI USAGE: input, output, cache read, cache write -- four numbers the
@@ -414,125 +422,120 @@ export function renderApp(nonce: string): string {
     app.appendChild(routeCard);
 
     // --------------------------------------------------------- AI APPS
+    // One row per app, answering one question: what is happening right now?
+    // Every word comes from the row the local process built (tool-row.ts);
+    // the page lays it out and adds nothing. Local-only telemetry is TRACKING,
+    // never mining.
     var tools = el("div", "card");
     tools.appendChild(el("h2", null, "AI apps on this PC"));
     state.tools.forEach(function (t) {
-      var row = el("div", "row");
-      var left = el("div");
-      left.appendChild(el("div", "name", t.name + (t.experimental ? "  (experimental)" : "") + (t.version ? "  " + t.version : "")));
-      if (t.detectionUnavailable) {
-        left.appendChild(el("div", "meta", "Detection unavailable"));
-      } else if (!t.installed) {
-        left.appendChild(el("div", "meta", "Not detected"));
-      } else if (!t.meterable) {
-        left.appendChild(el("div", "meta", t.availabilityNote || "Cannot be metered here"));
-      } else {
-        // Four separate facts, four separate lines.
-        var mappingWord = state.offline ? "status unavailable (offline)" : t.mappingStatus === "on" ? "ON" : t.mappingStatus === "off" ? "OFF" : "unknown";
-        left.appendChild(el("div", "meta", "USAGE mapping     " + mappingWord));
+      var r = t.row;
+      var row = el("div", "tool");
+      var head = el("div", "row");
+      head.appendChild(el("div", "name", (r ? r.title : t.name) + (t.version ? "  " + t.version : "") + (t.experimental ? "  (experimental)" : "")));
+      if (r && r.tracking === "ACTIVE") head.appendChild(el("span", "tag on", "TRACKING LIVE"));
+      else head.appendChild(el("span", "tag off", r && r.detected === "YES" ? "NOT TRACKING" : "—"));
+      row.appendChild(head);
+
+      var kv = el("div", "kv");
+      function line(label, value, cls) {
+        kv.appendChild(el("div", "k", label));
+        kv.appendChild(el("div", "v" + (cls ? " " + cls : ""), value));
+      }
+      line("Detected", r ? r.detected : (t.installed ? "YES" : "NO"));
+      if (t.installed && !t.meterable) {
+        line("Usage tracking", "UNAVAILABLE");
+        row.appendChild(kv);
+        row.appendChild(el("div", "note", t.availabilityNote || "This app cannot be measured here."));
+      } else if (r && t.installed) {
+        line("Usage tracking", r.tracking + (r.trackingVia ? " · " + r.trackingVia : ""));
+        if (r.mode === "verified_route") line("Route", r.route || "—");
+        else line("Usage source", r.usageSource || "Your own sign-in");
+        line("Verification", r.verification);
+        line("Reward", r.reward);
+        var d = r.today;
+        var today = "Input " + fmtMaybe(d.input) + " · Output " + fmtMaybe(d.output) +
+          " · Cache read " + fmtMaybe(d.cacheRead) + " · Cache write " + fmtMaybe(d.cacheWrite) +
+          (d.reasoning !== null ? " · Reasoning " + fmtMaybe(d.reasoning) : "");
+        line("Today", today, "tnum");
+        r.coverage.forEach(function (c) {
+          line(c.mode, c.label + (c.limitation ? " — " + c.limitation : ""), c.level === "usage_detail" ? "" : "dim");
+        });
         var tr = t.tracking || {};
-        var trackingWord = tr.active ? "ACTIVE" : tr.lastEventAt ? "idle · last event " + fmtTime(tr.lastEventAt) : t.mappingStatus === "on" ? "idle — start the app from here to track" : "off";
-        left.appendChild(el("div", "meta", "Tracking          " + trackingWord));
         if (tr.lastSyncOutcome) {
           var ok = tr.lastSyncOutcome === "accepted" || tr.lastSyncOutcome === "duplicate";
-          left.appendChild(el("div", ok ? "meta" : "err", "Last sync         " + (tr.lastSyncAt ? fmtTime(tr.lastSyncAt) + " · " : "") + (tr.lastSyncLabel || tr.lastSyncOutcome) + (tr.buffered ? " · " + tr.buffered + " waiting" : "")));
+          line("Last sync", (tr.lastSyncAt ? fmtTime(tr.lastSyncAt) + " · " : "") + (tr.lastSyncLabel || tr.lastSyncOutcome) + (tr.buffered ? " · " + tr.buffered + " waiting" : ""), ok ? "" : "bad");
         }
-        var lv = t.launch;
-        if (lv) {
-          // One of exactly two modes. A track-only session is never called
-          // mining, and never shows a USAGE route.
-          if (lv.account) left.appendChild(el("div", "meta", "Account           " + lv.account));
-          left.appendChild(el("div", "meta", "Route             " + lv.route));
-          left.appendChild(el("div", "meta", "Verification      " + lv.verification));
-          left.appendChild(el("div", "meta", "Reward            " + lv.reward));
-          if (lv.explanation) left.appendChild(el("div", "note", lv.explanation));
-        } else {
-          left.appendChild(el("div", "meta", "Verification      " + ceilingLabel(t.verificationCeiling)));
-          left.appendChild(el("div", "meta", "Reward            " + (t.reward ? t.reward.status.toUpperCase() + (t.reward.reason ? " — " + t.reward.reason : "") : "—")));
-        }
+        row.appendChild(kv);
+        if (!d.available && state.usage) row.appendChild(el("div", "note", "Per-app figures for today are not provided by this USAGE server yet; the totals above include this app."));
+        if (r.mode === "track_only" && t.launch && t.launch.explanation) row.appendChild(el("div", "note", t.launch.explanation));
+      } else {
+        row.appendChild(kv);
       }
-      if (t.conflict) left.appendChild(el("div", "meta", t.conflict));
-      row.appendChild(left);
+      if (t.detectionUnavailable) row.appendChild(el("div", "meta", "Detection unavailable — checked again on the next refresh."));
+      if (t.conflict) row.appendChild(el("div", "meta", t.conflict));
 
-      var right = el("div", "actions");
-      if (t.installed && t.meterable) {
-        var label = el("label", "switch");
-        var box = document.createElement("input");
-        box.type = "checkbox";
-        box.checked = t.mappingStatus === "on";
-        box.disabled = !!state.offline;
-        box.onchange = function () {
-          var enable = box.checked;
-          if (enable && !window.confirm(
-            "Allow USAGE to meter " + t.name + "?\\n\\nUSAGE reads: " + t.reads.join(", ") +
-            ".\\nUSAGE never reads: " + t.neverReads.join(", ") + "."
-          )) { box.checked = false; return; }
+      var actions = el("div", "actions");
+      actions.style.marginTop = "8px";
+      if (r && r.actions.startVerifiedRoute.visible) {
+        var start = el("button", "primary", "Start verified route");
+        start.disabled = !r.actions.startVerifiedRoute.enabled;
+        start.title = r.actions.startVerifiedRoute.reason || "Starts the app through a verified USAGE route on your connected provider.";
+        start.onclick = function () {
           act(function () {
-            return api("/mapping", { tool: t.id, enabled: enable }).then(function (r) {
-              if (r && r.error) window.alert(r.message || "Could not change mapping.");
+            return api("/launch", { tool: t.id }).then(function (res) {
+              if (res && res.error) { window.alert(res.message || "Could not start it."); return; }
+              if (res && res.label) {
+                var was = start.textContent;
+                start.textContent = (res.mode === "track_only" ? "Tracking: " : "Starting: ") + res.label + " · " + String(res.reward || "") + (res.wire ? " · " + res.wire : "");
+                setTimeout(function () { start.textContent = was; }, 6000);
+              }
             });
           });
         };
-        label.appendChild(box);
-        label.appendChild(el("span", null, "Map usage"));
-        right.appendChild(label);
-
-        if ((t.mode === "launch" || t.id === "codex") && t.launch && t.launch.mode === "verified_route") {
-          var start = el("button", "primary", "Start with USAGE");
-          start.title = "Resolves the route freshly from USAGE, then starts the app routed through it, with usage tracking.";
-          start.onclick = function () {
-            act(function () {
-              return api("/launch", { tool: t.id }).then(function (r) {
-                if (r && r.error) { window.alert(r.message || "Could not start it."); return; }
-                if (r && r.label) {
-                  // What the click resolved, from the server, seconds ago.
-                  var was = start.textContent;
-                  start.textContent = (r.mode === "track_only" ? "Tracking: " : "Starting: ") + r.label + " · " + String(r.reward || "") + (r.wire ? " · " + r.wire : "");
-                  setTimeout(function () { start.textContent = was; }, 6000);
-                }
-              });
-            });
-          };
-          right.appendChild(start);
-        }
-        if ((t.mode === "launch" || t.id === "codex") && t.launch && t.launch.mode === "track_only") {
-          // TRACK ONLY is the only way to start an app with no verified route.
-          var track = el("button", "primary", "Track only");
-          track.disabled = t.mappingStatus !== "on";
-          track.title = t.mappingStatus === "on"
-            ? "Starts the app with its own sign-in and provider; USAGE only tracks usage on this PC. Does not earn."
-            : "Turn on Map usage first, so there is something to track.";
-          track.onclick = function () {
-            act(function () {
-              return api("/launch", { tool: t.id, route: false }).then(function (r) {
-                if (r && r.error) window.alert(r.message || "Could not start it.");
-              });
-            });
-          };
-          right.appendChild(track);
-        } else if (t.mode === "launch" || t.id === "codex") {
-          if (t.mappingStatus === "on") {
-            var trackOnly = el("button", null, "Track only");
-            trackOnly.title = "Starts the app with its own sign-in and provider; USAGE only tracks usage.";
-            trackOnly.onclick = function () {
-              act(function () {
-                return api("/launch", { tool: t.id, route: false }).then(function (r) {
-                  if (r && r.error) window.alert(r.message || "Could not start it.");
-                });
-              });
-            };
-            right.appendChild(trackOnly);
-          }
-        }
-      } else if (!t.installed) {
-        right.appendChild(el("span", "tag off", "—"));
+        actions.appendChild(start);
       }
-      row.appendChild(right);
+      if (r && r.actions.trackOnly.visible) {
+        var track = el("button", r.actions.startVerifiedRoute.visible ? null : "primary", "Track only");
+        track.disabled = !r.actions.trackOnly.enabled;
+        track.title = r.actions.trackOnly.reason || "Starts the app on its own sign-in and provider; USAGE only tracks usage on this PC. Does not earn.";
+        track.onclick = function () {
+          if (t.mappingStatus !== "on" && !window.confirm(
+            "Track " + t.name + " on this PC?\\n\\nUSAGE reads: " + t.reads.join(", ") +
+            ".\\nUSAGE never reads: " + t.neverReads.join(", ") + "."
+          )) return;
+          act(function () {
+            var ready = t.mappingStatus === "on" ? Promise.resolve({}) : api("/mapping", { tool: t.id, enabled: true });
+            return ready.then(function (m) {
+              if (m && m.error) { window.alert(m.message || "Could not turn tracking on."); return; }
+              return api("/launch", { tool: t.id, route: false }).then(function (res) {
+                if (res && res.error) window.alert(res.message || "Could not start it.");
+              });
+            });
+          });
+        };
+        actions.appendChild(track);
+      }
+      if (r && r.actions.stopTracking.visible) {
+        var stop = el("button", null, "Stop tracking");
+        stop.disabled = !r.actions.stopTracking.enabled;
+        stop.title = r.actions.stopTracking.reason || "USAGE stops accepting this app's usage from this PC.";
+        stop.onclick = function () {
+          if (!window.confirm("Stop tracking " + t.name + " on this PC?\\n\\nThe app keeps running; USAGE stops accepting its usage.")) return;
+          act(function () {
+            return api("/tracking/stop", { tool: t.id }).then(function (res) {
+              if (res && res.error) window.alert(res.message || "Could not stop tracking.");
+            });
+          });
+        };
+        actions.appendChild(stop);
+      }
+      row.appendChild(actions);
       tools.appendChild(row);
     });
     tools.appendChild(el("div", "note",
-      "Mapping is per app and opt-in, and USAGE's record of it is what you see here. A mapped app is tracked from its own official telemetry when started from this window. " +
-      "\\"Start with USAGE\\" routes its requests through a verified USAGE route and can earn; \\"Track only\\" keeps the app on its own sign-in, is measured on this PC only, and does not earn. " +
+      "\\"Start verified route\\" sends the app's requests through a verified USAGE route on your connected provider and can earn. " +
+      "\\"Track only\\" keeps the app on its own sign-in and provider: USAGE measures token counts from the app's own telemetry on this PC, and that does not earn. " +
       "Nothing is written to the app's settings and nothing is read from your files."));
     app.appendChild(tools);
 
@@ -604,6 +607,9 @@ export function renderApp(nonce: string): string {
     if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k";
     return String(n);
   }
+  function fmtMaybe(n) {
+    return n === null || n === undefined ? "—" : fmtTokens(n);
+  }
   function fmtTime(iso) {
     try {
       var d = new Date(iso);
@@ -641,7 +647,7 @@ export function renderApp(nonce: string): string {
 
       var so = el("button", null, "Sign out");
       so.onclick = function () {
-        if (!window.confirm("Sign this device out? Mining stops until you sign in again.")) return;
+        if (!window.confirm("Sign this device out? Mining and tracking stop until you sign in again.")) return;
         act(function () { return api("/sign-out", {}); });
       };
       links.appendChild(so);

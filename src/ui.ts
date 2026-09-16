@@ -26,6 +26,7 @@ import { renderApp } from "./ui-page.js";
 import { migrateInsecureConfig } from "./migrate.js";
 import { chooseRoute, type ChosenRoute } from "./route.js";
 import { launchViewFor, TRACK_ONLY_EXPLANATION, type ToolLaunchView } from "./launch.js";
+import { describeToolRow, type ToolRowView } from "./tool-row.js";
 
 /**
  * The desktop window.
@@ -76,6 +77,8 @@ interface ToolView {
     lastSyncOutcome: string | null;
     lastSyncLabel: string | null;
     buffered: number;
+    /** The mode the running session was launched in, when one is running. */
+    launchMode: "verified_route" | "track_only" | null;
   };
   /** Reward status for usage from this tool on the current route, in words. */
   reward: { status: "eligible" | "held" | "ineligible" | "none"; reason: string };
@@ -92,6 +95,8 @@ interface ToolView {
   neverReads: readonly string[];
   /** Detection threw or timed out. The tool is shown, not the whole window hidden. */
   detectionUnavailable: boolean;
+  /** "What is happening right now?" -- every word of the row, decided in tool-row.ts. */
+  row: ToolRowView | null;
 }
 
 export interface AiRoute {
@@ -193,7 +198,7 @@ async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
     mode: adapter.persistentConfig === "unsafe" ? "launch" : "configure",
     mapped: false,
     mappingStatus: "unknown",
-    tracking: { active: false, lastEventAt: null, lastSyncAt: null, lastSyncOutcome: null, lastSyncLabel: null, buffered: 0 },
+    tracking: { active: false, lastEventAt: null, lastSyncAt: null, lastSyncOutcome: null, lastSyncLabel: null, buffered: 0, launchMode: null },
     reward: { status: "none", reason: "" },
     launch: null,
     meterable: !capabilities.meteringMethods.includes("unsupported"),
@@ -202,6 +207,7 @@ async function readTool(adapter: LocalToolAdapter): Promise<ToolView> {
     reads: privacy.reads,
     neverReads: privacy.neverReads,
     detectionUnavailable: false,
+    row: null,
   };
   try {
     const detection = await withTimeout(adapter.detect(), DETECT_TIMEOUT_MS, `${adapter.id} detection`);
@@ -269,6 +275,23 @@ export function noteSecurityMigration(detail: string): void {
 }
 
 export async function buildState(pairing: AppState["pairing"] = null): Promise<AppState> {
+  const state = await collectState(pairing);
+  applyRows(state);
+  return state;
+}
+
+/** Fill every tool's row from the finished state, whichever way building it ended. */
+export function applyRows(state: AppState): void {
+  for (const tool of state.tools) {
+    tool.row = describeToolRow(tool, {
+      offline: state.offline,
+      alwaysOnListening: state.alwaysOn.enabled && state.alwaysOn.listening === "listening",
+      todayByTool: state.usage?.byTool ?? null,
+    });
+  }
+}
+
+async function collectState(pairing: AppState["pairing"]): Promise<AppState> {
   const state: AppState = {
     version: VERSION,
     signedIn: false,
@@ -415,6 +438,7 @@ async function applyTrackingStatus(state: AppState, deviceId: string): Promise<v
       lastSyncOutcome: s.lastSyncOutcome,
       lastSyncLabel: s.lastSyncOutcome ? SYNC_COPY[s.lastSyncOutcome] : null,
       buffered: s.buffered,
+      launchMode: s.launchMode ?? null,
     };
   }
 }
@@ -767,6 +791,39 @@ export async function startDesktop(): Promise<DesktopHandle> {
         } catch (error) {
           json(response, { error: "server", message: (error as Error).message }, 502);
         }
+        return;
+      }
+
+      /**
+       * Stop tracking one app on this PC.
+       *
+       * Turns the device's mapping off on USAGE -- which is what makes the
+       * server refuse further telemetry from a session already running -- and
+       * locally, so the launcher does not start a new one. For Claude Code it
+       * also removes "measure everywhere", which would otherwise keep
+       * receiving. The app itself is never killed: it is the user's work.
+       */
+      if (url.pathname === "/tracking/stop" && request.method === "POST") {
+        const body = await readBody(request);
+        const adapter = ADAPTERS.find((entry) => entry.id === body.tool);
+        if (!adapter) return json(response, { error: "unknown_tool" }, 400);
+        const credential = await loadCredential();
+        if (!credential) return json(response, { error: "not_signed_in" }, 401);
+
+        const detection = await adapter.detect();
+        try {
+          await setMapping(credential.serverUrl, credential.token, adapter.id, false, detection.version);
+        } catch (error) {
+          return json(response, { error: "server", message: `USAGE did not record the change: ${(error as Error).message}` }, 502);
+        }
+        await setMapped(credential.deviceId, adapter.id, false);
+        if (adapter.id === "claude-code") {
+          await disableAlwaysOn().catch(() => null);
+          await alwaysOnService?.refresh().catch(() => undefined);
+        }
+        invalidateConfigCache();
+        await logEvent({ event: "unmap", tool: adapter.id, outcome: "ok", detail: "stop_tracking" });
+        json(response, { ok: true, message: `Tracking is off for ${adapter.displayName}. A window already open keeps running; USAGE no longer accepts its usage.` });
         return;
       }
 

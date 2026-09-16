@@ -77,7 +77,15 @@ export interface TelemetryLaunch {
   env: Record<string, string>;
   /** Extra command-line arguments, for tools configured that way (Codex `-c`). */
   args: readonly string[];
+  /**
+   * Inherited variables removed from the child for a tracked session, because
+   * they would outrank or redirect the settings above (Gemini's outfile).
+   */
+  unsetEnv?: readonly string[];
 }
+
+/** Whether a tracked session may start. A refusal says why, in words. */
+export type TelemetryPreflight = { ok: true } | { ok: false; message: string };
 
 export interface ToolDetection {
   installed: boolean;
@@ -162,6 +170,12 @@ export interface LocalToolAdapter {
    * per launch and never the miner credential.
    */
   telemetryLaunch(receiver: { endpoint: string; sessionSecret: string }): TelemetryLaunch | null;
+  /**
+   * Checked before a tracked session starts. Refuses when the user's own
+   * configuration could make the tool export content, or export nowhere USAGE
+   * can receive, whatever the launch sets. Optional: most tools need none.
+   */
+  telemetryPreflight?(context: { cwd: string; env: NodeJS.ProcessEnv }): Promise<TelemetryPreflight>;
 
   detect(): Promise<ToolDetection>;
   inspectRouting(): Promise<RoutingState>;

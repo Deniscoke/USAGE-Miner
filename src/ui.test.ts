@@ -113,6 +113,11 @@ describe("the local desktop server", () => {
       "cursor",
       "gemini-cli",
     ]);
+    // Every tool carries its "what is happening right now?" row, even signed out.
+    for (const tool of state.tools as { row: { tracking: string; verification: string } | null }[]) {
+      expect(tool.row?.tracking).toBe("OFF");
+      expect(tool.row?.verification).toBe("LOCAL ONLY");
+    }
   });
 
   it("never returns a credential to the page", async () => {

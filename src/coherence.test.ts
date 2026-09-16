@@ -103,9 +103,9 @@ describe("the home screen answers the seven questions", () => {
   it("names account, device, mapping, tracking, verification, reward and why", () => {
     const html = renderApp("abcdefghijklmnopqrstuvwxyz012345");
     for (const text of [
-      "CONNECTED ✓", "This PC · ", "TRACKING ACTIVE", "Why no USAGE? ", "AI route",
-      "USAGE mapping     ", "Tracking          ", "Verification      ", "Reward            ",
-      "Track only", "Start with USAGE", "status unavailable (offline)", "Last sync         ",
+      "CONNECTED ✓", "This PC · ", "TRACKING LIVE", "Why no USAGE? ", "AI route",
+      '"Detected"', '"Usage tracking"', '"Usage source"', '"Route"', '"Verification"', '"Reward"', '"Today"',
+      "Track only", "Start verified route", "Stop tracking", '"Last sync"', "/tracking/stop",
     ]) {
       expect(html, text).toContain(text);
     }

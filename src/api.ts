@@ -378,6 +378,12 @@ export interface DeviceUsageSummary {
   /** The most recent settled day and what it paid. Absent from older servers. */
   lastCredit?: { day: string; points: number; creditedAt: string } | null;
   recent: { tool: string; model?: string | null; tokens: number; breakdown?: UsageBreakdown; status: "tracked" | "verified" | "routed"; at: string }[];
+  /**
+   * Today's tracked figures per app (tool id -> breakdown), as the SERVER
+   * summed them. Absent from servers that predate per-app figures; the window
+   * then shows a dash rather than adding up `recent` itself.
+   */
+  byTool?: Record<string, UsageBreakdown>;
 }
 
 export function fetchDeviceUsage(serverUrl: string, token: string): Promise<DeviceUsageSummary> {

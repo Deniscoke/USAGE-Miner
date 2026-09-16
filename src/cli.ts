@@ -504,6 +504,18 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
   // per-session secret; the miner credential is nowhere in the tool's
   // environment unless routing put it there for the provider header.
   let session: Awaited<ReturnType<typeof startMeteringSession>> | null = null;
+  if (mapped && meterable && adapter.telemetryPreflight) {
+    // Before any receiver exists: a user's own setting that would make the
+    // tool export content is a refusal, not something to outrank and hope.
+    const preflight = await adapter.telemetryPreflight({ cwd: process.cwd(), env: process.env });
+    if (!preflight.ok) {
+      await logEvent({ event: "launch", tool: adapter.id, outcome: "error", detail: "telemetry_preflight_refused" });
+      out("");
+      out(`  Tracking refused: ${preflight.message}`);
+      out("");
+      process.exit(1);
+    }
+  }
   if (mapped && meterable) {
     const key = await loadDeviceKey();
     await registerDeviceKey(serverUrl(credential), credential.token, key.publicKey).catch(() => undefined);
@@ -514,6 +526,7 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
       token: credential.token,
       key,
       deviceId: credential.deviceId,
+      launchMode: decision.mode,
       onObservation: (o) => {
         const tokens = (o.inputTokens ?? 0) + (o.outputTokens ?? 0);
         out(`  [USAGE] tracked ${tokens.toLocaleString()} tokens${o.model ? ` · ${o.model}` : ""}${o.upstreamRequestId ? " · request id" : ""}`);
@@ -524,6 +537,7 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
       sessionSecret: session.receiver.sessionSecret,
     });
     if (telemetry) {
+      for (const name of telemetry.unsetEnv ?? []) delete env[name];
       Object.assign(env, telemetry.env);
       extraArgs.push(...telemetry.args);
     }

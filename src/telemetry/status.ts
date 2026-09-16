@@ -41,6 +41,11 @@ export interface ToolTelemetryStatus {
   lastSyncOutcome: SyncOutcome | null;
   /** Observations waiting in the local buffer for the server. */
   buffered: number;
+  /**
+   * How the running session was started: through a verified route, or Track
+   * only. Local display only; absent from files older builds wrote.
+   */
+  launchMode?: "verified_route" | "track_only" | null;
 }
 
 interface StatusFile {

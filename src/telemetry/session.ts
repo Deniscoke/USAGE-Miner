@@ -38,6 +38,8 @@ export async function startMeteringSession(input: {
   key: DeviceKey;
   /** The paired device this session reports for. Status is filed under it. */
   deviceId?: string;
+  /** How the tool is being launched, for the window's row. Display only. */
+  launchMode?: "verified_route" | "track_only";
   onObservation?: (observation: LocalUsageObservation) => void;
 }): Promise<MeteringSession> {
   const mapping = MAPPINGS[input.adapter.id];
@@ -78,7 +80,7 @@ export async function startMeteringSession(input: {
     });
   });
 
-  await status({ active: true, pid: process.pid, sessionStartedAt: new Date().toISOString(), eventsThisSession: 0 });
+  await status({ active: true, pid: process.pid, sessionStartedAt: new Date().toISOString(), eventsThisSession: 0, launchMode: input.launchMode ?? null });
 
   await logEvent({ event: "metering_start", tool: input.adapter.id, outcome: "ok" });
 
@@ -96,6 +98,7 @@ export async function startMeteringSession(input: {
       await status({
         active: false,
         pid: null,
+        launchMode: null,
         buffered,
         ...(flushed.result || flushed.errorCode
           ? { lastSyncAt: new Date().toISOString(), lastSyncOutcome: syncOutcomeFrom({ result: flushed.result, errorCode: flushed.errorCode ?? null, errorStatus: flushed.errorStatus ?? null }) }

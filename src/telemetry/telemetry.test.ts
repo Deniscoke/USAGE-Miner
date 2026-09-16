@@ -269,7 +269,10 @@ describe("Gemini CLI normalization", () => {
     const [obs] = normalizeRecords(flattenOtlpLogs(payload), GEMINI_CLI_MAPPING, { toolVersion: "0.59.0", localSessionId: "s" });
     expect(obs.provider).toBe("google");
     expect(obs.model).toBe("gemini-2.5-pro");
-    expect(obs.inputTokens).toBe(1200);
+    // Fresh input: Gemini's input_token_count is promptTokenCount, which
+    // already includes the 400 cached tokens (ai.google.dev UsageMetadata).
+    expect(obs.inputTokens).toBe(800);
+    expect(obs.cacheReadTokens).toBe(400);
     expect(obs.reasoningTokens).toBe(150);
     expect(obs.toolTokens).toBe(20);
     // No request id in Gemini's event, and none invented.

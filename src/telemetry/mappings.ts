@@ -63,6 +63,16 @@ export const GEMINI_CLI_MAPPING: TelemetryMapping = {
   tool: "gemini-cli",
   provider: "google",
   eventNames: ["gemini_cli.api_response", "api_response"],
+  // `input_token_count` is Gemini's `promptTokenCount` (types.ts ApiResponseEvent,
+  // v0.60.0), which "includes the number of tokens in the cached content"
+  // (ai.google.dev/api/generate-content#UsageMetadata). Copied straight
+  // across, every cached token was counted twice, as Codex's once were.
+  // Thoughts and tool-use prompt tokens are separate from both input and
+  // output there, so they stay their own categories.
+  //
+  // Gemini writes `?? 0` for every count its API did not return, so on this
+  // wire a zero cannot be told apart from "not reported".
+  inputIncludesCacheRead: true,
   fields: {
     model: "model",
     inputTokens: "input_token_count",
@@ -85,6 +95,17 @@ export const GEMINI_CLI_MAPPING: TelemetryMapping = {
  *
  * `codex.tool_result` carries `arguments` and `output` -- tool content. Not
  * an accepted event name, so never parsed.
+ *
+ * Re-audited at rust-v0.153.3 (docs/COVERAGE.md): the token-bearing record is
+ * emitted from core/src/client.rs for BOTH the WebSocket transport a stock
+ * OpenAI install prefers and the HTTP/SSE fallback. On HTTP every SSE frame
+ * also yields a `codex.sse_event`, including a second `response.completed`
+ * with no counts; a record with neither input nor output is dropped by
+ * normalizeRecords, so it never becomes an empty observation. The input,
+ * output and tool counts arrive as STRING attributes (formatted with `%`),
+ * the cached, cache-write and reasoning counts as ints; `integer()` reads both.
+ * Every event also carries `user.email`, `user.account_id`, `conversation.id`,
+ * `originator`, `terminal.type` and `auth_mode` -- none named here.
  */
 export const CODEX_MAPPING: TelemetryMapping = {
   adapter: "codex-otel-adapter-v1",
