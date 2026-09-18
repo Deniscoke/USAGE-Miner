@@ -5,12 +5,13 @@ import { hostname, platform, release } from "node:os";
 import { fetchConfig, pollPairing, sendHeartbeat, startPairing, type MinerConfig } from "./api.js";
 import { startBackgroundLoop } from "./background.js";
 import { createAlwaysOnService, type AlwaysOnListening } from "./telemetry/always-on-service.js";
-import { alwaysOnStatus, disableAlwaysOn, enableAlwaysOn } from "./telemetry/always-on.js";
+import { alwaysOnStatus, disableAlwaysOn, enableAlwaysOn, type AlwaysOnResult } from "./telemetry/always-on.js";
+import { diagnostics, diagnosticsLine, type Diagnostics } from "./diagnostics.js";
 import { pending } from "./telemetry/buffer.js";
 import { createUploader } from "./telemetry/uploader.js";
 import { loadDeviceKey } from "./device-key.js";
 import { logEvent } from "./log.js";
-import { clearCredential, loadCredential, saveCredential, type StoredCredential } from "./secrets.js";
+import { clearCredential, loadCredential, saveCredential, SecretStorageError, type StoredCredential } from "./secrets.js";
 import { claudeCodeAdapter } from "./tools/claude-code.js";
 import { codexAdapter } from "./tools/codex.js";
 import { geminiCliAdapter } from "./tools/gemini-cli.js";
@@ -48,6 +49,11 @@ import { describeToolRow, type ToolRowView } from "./tool-row.js";
  */
 
 const ADAPTERS: LocalToolAdapter[] = [claudeCodeAdapter, geminiCliAdapter, codexAdapter, cursorAdapter];
+
+/** Routes the page calls; anything else is logged as "other", never by its path. */
+const CONTROL_ROUTES = new Set([
+  "/state", "/sign-in", "/sign-out", "/enable", "/launch", "/mapping", "/tracking/stop", "/always-on", "/disable", "/open", "/quit",
+]);
 
 interface ToolView {
   id: string;
@@ -151,6 +157,44 @@ export interface AppState {
   usage: DeviceUsageSummary | null;
   /** "Measure Claude Code everywhere": the switch, and whether its receiver is up. */
   alwaysOn: { enabled: boolean; listening: AlwaysOnListening; eventsSinceStart: number; lastEventAt: string | null };
+  /** This build and how it was started, from this process only. */
+  diagnostics: Diagnostics;
+}
+
+/** Exactly what the window says after each switch. */
+export const ALWAYS_ON_COPY = Object.freeze({
+  offTitle: "MEASURE EVERYWHERE OFF",
+  off: "Claude Code sessions started before this may keep trying to report until you restart them; USAGE Miner no longer receives or uploads them.",
+  onTitle: "MEASURE EVERYWHERE ON",
+  on: "Applies to Claude Code sessions started from now on.",
+});
+
+/** A code safe for the log: an errno or a known error code, never a message. */
+function safeReason(error: unknown): string {
+  if (error instanceof SecretStorageError) return error.code;
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return typeof code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(code) ? code : "exception";
+}
+
+/**
+ * Turn "measure everywhere" off on the way out of something else (sign-out,
+ * stop tracking). Logged either way, so a failure is never silent.
+ */
+async function turnAlwaysOnOff(via: string): Promise<AlwaysOnResult | null> {
+  try {
+    const result = await disableAlwaysOn();
+    await logEvent({
+      event: "always_on_disable",
+      tool: "claude-code",
+      outcome: result.ok ? "ok" : "error",
+      detail: result.ok ? `${via}:${result.changed ? "changed" : "unchanged"}` : `${via}:${result.reason}${result.detail ? `:${result.detail}` : ""}`,
+    });
+    await alwaysOnService?.refresh().catch(() => undefined);
+    return result;
+  } catch (error) {
+    await logEvent({ event: "always_on_disable", tool: "claude-code", outcome: "error", detail: `${via}:${safeReason(error)}` });
+    return null;
+  }
 }
 
 /** Set by startDesktop; null in the CLI and in tests that build state directly. */
@@ -316,6 +360,7 @@ async function collectState(pairing: AppState["pairing"]): Promise<AppState> {
       enabled: (await alwaysOnStatus().catch(() => ({ enabled: false }))).enabled,
       ...(alwaysOnService?.state() ?? { listening: "off" as const, eventsSinceStart: 0, lastEventAt: null }),
     },
+    diagnostics: diagnostics(),
   };
 
   let credential: StoredCredential | null = null;
@@ -594,7 +639,10 @@ async function backgroundTick(): Promise<void> {
   await createUploader({ serverUrl: credential.serverUrl, token: credential.token, key }).flush();
 }
 
-export async function startDesktop(): Promise<DesktopHandle> {
+export async function startDesktop(options: {
+  /** Tests only: keep the always-on receiver off the real fixed port. */
+  alwaysOnPort?: number;
+} = {}): Promise<DesktopHandle> {
   // Guessing this is the only thing standing between a hostile local page and
   // the miner's controls, so it is full-strength random, not a counter.
   const nonce = randomBytes(24).toString("base64url");
@@ -621,8 +669,18 @@ export async function startDesktop(): Promise<DesktopHandle> {
       return;
     }
 
+    // A refused control request is logged (route and which lock, nothing
+    // else): a switch that "did nothing" must leave a trace somewhere.
+    const refuse = async (lock: "nonce" | "origin") => {
+      if (request.method === "POST") {
+        const route = CONTROL_ROUTES.has(url.pathname) ? url.pathname.slice(1) : "other";
+        await logEvent({ event: "ui_forbidden", outcome: "error", detail: `${lock}:${route}` });
+      }
+      json(response, { error: "forbidden", message: "This window is no longer connected to the USAGE Miner that opened it. Close this tab and open USAGE Miner again." }, 403);
+    };
+
     if (url.searchParams.get("k") !== nonce) {
-      json(response, { error: "forbidden" }, 403);
+      await refuse("nonce");
       return;
     }
 
@@ -632,7 +690,7 @@ export async function startDesktop(): Promise<DesktopHandle> {
     // be the drive-by case this guards against.
     const origin = request.headers.origin;
     if (origin && origin !== `http://127.0.0.1:${port}`) {
-      json(response, { error: "forbidden" }, 403);
+      await refuse("origin");
       return;
     }
 
@@ -657,8 +715,7 @@ export async function startDesktop(): Promise<DesktopHandle> {
 
       if (url.pathname === "/sign-out" && request.method === "POST") {
         // Leaving the account also takes USAGE's settings out of Claude Code.
-        await disableAlwaysOn().catch(() => null);
-        await alwaysOnService?.refresh().catch(() => undefined);
+        await turnAlwaysOnOff("sign_out");
         await clearCredential();
         invalidateConfigCache();
         json(response, { ok: true });
@@ -817,10 +874,7 @@ export async function startDesktop(): Promise<DesktopHandle> {
           return json(response, { error: "server", message: `USAGE did not record the change: ${(error as Error).message}` }, 502);
         }
         await setMapped(credential.deviceId, adapter.id, false);
-        if (adapter.id === "claude-code") {
-          await disableAlwaysOn().catch(() => null);
-          await alwaysOnService?.refresh().catch(() => undefined);
-        }
+        if (adapter.id === "claude-code") await turnAlwaysOnOff("stop_tracking");
         invalidateConfigCache();
         await logEvent({ event: "unmap", tool: adapter.id, outcome: "ok", detail: "stop_tracking" });
         json(response, { ok: true, message: `Tracking is off for ${adapter.displayName}. A window already open keeps running; USAGE no longer accepts its usage.` });
@@ -835,31 +889,73 @@ export async function startDesktop(): Promise<DesktopHandle> {
        * USAGE refuses telemetry from a tool the device has not opted in. Off
        * removes exactly what was written. The mapping is left as it is on the
        * way off: launched sessions may still want it.
+       *
+       * Every attempt is logged with its outcome -- including a refusal and an
+       * exception -- because a switch that fails silently is indistinguishable,
+       * afterwards, from one that was never pressed. Both directions read the
+       * files back (verifyAlwaysOn) before answering "ok". Off never needs a
+       * credential: a signed-out or revoked device can always turn it off.
        */
       if (url.pathname === "/always-on" && request.method === "POST") {
         const body = await readBody(request);
-        const enabled = body.enabled === true;
-        const credential = await loadCredential();
-        if (enabled && !credential) return json(response, { error: "not_signed_in" }, 401);
-
-        const result = enabled ? await enableAlwaysOn({ force: body.force === true }) : await disableAlwaysOn();
-        if (!result.ok) return json(response, { error: result.reason, message: result.message }, 409);
-
-        if (enabled && credential) {
-          const detection = await claudeCodeAdapter.detect();
-          try {
-            await setMapping(credential.serverUrl, credential.token, "claude-code", true, detection.version);
-            await setMapped(credential.deviceId, "claude-code", true);
-            invalidateConfigCache();
-          } catch (error) {
-            // The settings are written; say that the opt-in did not reach USAGE.
-            await alwaysOnService?.refresh().catch(() => undefined);
-            return json(response, { ok: true, warning: `Measuring is on, but USAGE did not record the opt-in: ${(error as Error).message}` });
-          }
+        if (typeof body.enabled !== "boolean") {
+          await logEvent({ event: "always_on_toggle", tool: "claude-code", outcome: "error", detail: "bad_request" });
+          return json(response, { error: "bad_request", message: "The window sent a request USAGE Miner could not read. Reload the page and try again." }, 400);
         }
-        await alwaysOnService?.refresh().catch(() => undefined);
-        await logEvent({ event: enabled ? "always_on_enable" : "always_on_disable", tool: "claude-code", outcome: "ok" });
-        json(response, { ok: true, message: result.message });
+        const enabled = body.enabled;
+        const event = enabled ? "always_on_enable" : "always_on_disable";
+        const fail = async (status: number, error: string, reason: string, message: string) => {
+          await logEvent({ event, tool: "claude-code", outcome: "error", detail: reason });
+          json(response, { error, message }, status);
+        };
+
+        try {
+          let credential: StoredCredential | null = null;
+          if (enabled) {
+            credential = await loadCredential();
+            if (!credential) return await fail(401, "not_signed_in", "not_signed_in", "Sign in first.");
+          }
+
+          const result = enabled ? await enableAlwaysOn({ force: body.force === true }) : await disableAlwaysOn();
+          if (!result.ok) {
+            const status = result.reason === "conflict" || result.reason === "settings_unreadable" ? 409 : 500;
+            return await fail(status, result.reason, result.detail ? `${result.reason}:${result.detail}` : result.reason, result.message);
+          }
+
+          // Before answering: this window's receiver follows the file now,
+          // and every other window's follows it on its next check.
+          await alwaysOnService?.refresh().catch(() => undefined);
+
+          let warning: string | null = null;
+          if (enabled && credential) {
+            try {
+              const detection = await claudeCodeAdapter.detect();
+              await setMapping(credential.serverUrl, credential.token, "claude-code", true, detection.version);
+              await setMapped(credential.deviceId, "claude-code", true);
+              invalidateConfigCache();
+            } catch (error) {
+              // The settings are written; say that the opt-in did not reach USAGE.
+              warning = `Measuring is on, but USAGE did not record the opt-in: ${(error as Error).message}`;
+            }
+          }
+          await logEvent({
+            event,
+            tool: "claude-code",
+            outcome: "ok",
+            detail: warning ? "mapping_not_recorded" : result.changed ? "changed" : "unchanged",
+          });
+          json(response, {
+            ok: true,
+            enabled,
+            title: enabled ? ALWAYS_ON_COPY.onTitle : ALWAYS_ON_COPY.offTitle,
+            message: enabled ? ALWAYS_ON_COPY.on : ALWAYS_ON_COPY.off,
+            ...(warning ? { warning } : {}),
+          });
+        } catch (error) {
+          const reason = safeReason(error);
+          await fail(500, "internal", reason,
+            `Measure everywhere could not be turned ${enabled ? "on" : "off"} (${reason}). The state shown below is read from disk; try again.`);
+        }
         return;
       }
 
@@ -933,12 +1029,19 @@ export async function startDesktop(): Promise<DesktopHandle> {
 
   // The receiver "measure Claude Code everywhere" points Claude Code at. Only
   // started when that switch is on; see telemetry/always-on.ts.
-  alwaysOnService = createAlwaysOnService({ loadCredential, loadDeviceKey });
-  await alwaysOnService.refresh().catch(() => undefined);
-  server.on("close", () => void alwaysOnService?.stop());
+  // It follows the switch FILE, re-read on a timer, so turning it off in any
+  // window stops the receiver in every window (see always-on-service.ts).
+  const service = createAlwaysOnService({ loadCredential, loadDeviceKey, port: options.alwaysOnPort });
+  alwaysOnService = service;
+  await service.refresh().catch(() => undefined);
+  service.watch();
+  server.on("close", () => {
+    void service.stop();
+    if (alwaysOnService === service) alwaysOnService = null;
+  });
   const appUrl = `http://127.0.0.1:${port}/?k=${nonce}`;
 
-  process.stdout.write(`USAGE Miner ${VERSION}\nOpening ${appUrl}\n`);
+  process.stdout.write(`USAGE ${diagnosticsLine()}\nOpening ${appUrl}\n`);
   openBrowser(appUrl);
 
   return {

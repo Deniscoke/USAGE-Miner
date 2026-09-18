@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ALWAYS_ON_HEADER, alwaysOnClaudeEnv, alwaysOnStatus, disableAlwaysOn, enableAlwaysOn } from "./always-on.js";
+import { ALWAYS_ON_HEADER, alwaysOnClaudeEnv, alwaysOnStatus, disableAlwaysOn, enableAlwaysOn, verifyAlwaysOn } from "./always-on.js";
 import { startTelemetryReceiver } from "./receiver.js";
 
 /**
@@ -398,5 +398,162 @@ describe("putting back what was there", () => {
     await disableAlwaysOn();
     const off = await readSettings();
     expect(off.env).toBeUndefined();
+  });
+});
+
+
+describe("settings safety against a realistic settings.json", () => {
+  // What a real, customised Claude Code settings file looks like: plugins,
+  // hooks, MCP servers, a model, permissions, a status line, and env keys of
+  // the user's own -- including a metrics exporter of theirs and a value for a
+  // key USAGE also writes.
+  const original = () => ({
+    $schema: "https://json.schemastore.org/claude-code-settings.json",
+    model: "opus",
+    permissions: { allow: ["Bash(npm run test:*)", "Read(~/projects/**)"], deny: ["Read(./.env)"], defaultMode: "acceptEdits" },
+    enabledPlugins: { "superpowers@marketplace": true, "context7@marketplace": false },
+    plugins: { marketplaces: ["github:someone/plugins"] },
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "node C:/hooks/guard.js", timeout: 5 }] }],
+      Stop: [{ hooks: [{ type: "command", command: "powershell -File C:/hooks/notify.ps1" }] }],
+    },
+    mcpServers: { local: { command: "node", args: ["C:/mcp/server.js"], env: { MCP_TOKEN_FILE: "C:/mcp/token" } } },
+    statusLine: { type: "command", command: "node C:/statusline.js", padding: 0 },
+    includeCoAuthoredBy: false,
+    env: {
+      MY_PROJECT_ROOT: "C:/work",
+      OTEL_METRICS_EXPORTER: "otlp",
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "http://localhost:4318/v1/metrics",
+      // The user already had this one; USAGE writes "0" while on and must put "1" back.
+      OTEL_LOG_TOOL_DETAILS: "1",
+      DISABLE_AUTOUPDATER: "1",
+    },
+  });
+
+  it("ON then OFF leaves the file exactly as it was", async () => {
+    await writeSettings(original());
+    expect((await enableAlwaysOn()).ok).toBe(true);
+    const on = await readSettings();
+    // Nothing of theirs moves while it is on, except the keys USAGE writes.
+    const { env: onEnv, ...onRest } = on;
+    const { env: origEnv, ...origRest } = original();
+    expect(onRest).toEqual(origRest);
+    expect(onEnv!.OTEL_METRICS_EXPORTER).toBe("otlp");
+    expect(onEnv!.OTEL_LOG_TOOL_DETAILS).toBe("0");
+    expect(onEnv!.MY_PROJECT_ROOT).toBe(origEnv.MY_PROJECT_ROOT);
+
+    expect(await disableAlwaysOn()).toMatchObject({ ok: true, changed: true });
+    expect(await readSettings()).toEqual(original());
+    expect(await verifyAlwaysOn("off")).toEqual({ ok: true });
+  });
+
+  it("ON, OFF, ON, OFF ends where it started, with one stable receiver key", async () => {
+    await writeSettings(original());
+    await enableAlwaysOn();
+    const key1 = (await alwaysOnStatus()).receiverKey;
+    await disableAlwaysOn();
+    await enableAlwaysOn();
+    const key2 = (await alwaysOnStatus()).receiverKey;
+    expect(key2).toBe(key1);
+    expect((await readSettings()).env!.OTEL_LOG_TOOL_DETAILS).toBe("0");
+    await disableAlwaysOn();
+    expect(await readSettings()).toEqual(original());
+  });
+
+  it("OFF when already OFF changes nothing and does not rewrite the file", async () => {
+    // Formatting the user chose (tabs, no trailing newline) survives, because
+    // the file is not written at all.
+    const text = JSON.stringify(original(), null, "\t");
+    await mkdir(process.env.CLAUDE_CONFIG_DIR!, { recursive: true });
+    await writeFile(settingsFile(), text, "utf8");
+    expect(await disableAlwaysOn()).toMatchObject({ ok: true, changed: false });
+    expect(await readFile(settingsFile(), "utf8")).toBe(text);
+
+    // And after a real ON/OFF, a second OFF is a no-op too.
+    await enableAlwaysOn();
+    await disableAlwaysOn();
+    const after = await readFile(settingsFile(), "utf8");
+    expect(await disableAlwaysOn()).toMatchObject({ ok: true, changed: false });
+    expect(await readFile(settingsFile(), "utf8")).toBe(after);
+  });
+
+  it("a key the user changed while ON keeps the user's value after OFF", async () => {
+    await writeSettings(original());
+    await enableAlwaysOn();
+    const on = await readSettings();
+    on.env!.OTEL_LOG_TOOL_DETAILS = "2";
+    on.env!.OTEL_LOGS_EXPORTER = "console";
+    on.model = "sonnet";
+    await writeSettings(on);
+
+    expect((await disableAlwaysOn()).ok).toBe(true);
+    const off = await readSettings();
+    expect(off.env!.OTEL_LOG_TOOL_DETAILS).toBe("2");
+    expect(off.env!.OTEL_LOGS_EXPORTER).toBe("console");
+    expect(off.model).toBe("sonnet");
+    // Everything still exactly ours went.
+    expect(off.env!.CLAUDE_CODE_ENABLE_TELEMETRY).toBeUndefined();
+    expect(off.env!.OTEL_EXPORTER_OTLP_LOGS_HEADERS).toBeUndefined();
+    expect(await verifyAlwaysOn("off")).toEqual({ ok: true });
+  });
+
+  it("never overwrites a malformed settings.json, on the way on or off", async () => {
+    await writeSettings(original());
+    await enableAlwaysOn();
+    const broken = '{ "model": "opus", "env": { "OTEL_LOGS_EXPORTER": "otlp", ';
+    await writeFile(settingsFile(), broken, "utf8");
+
+    const off = await disableAlwaysOn();
+    expect(off.ok === false && off.reason).toBe("settings_unreadable");
+    expect(await readFile(settingsFile(), "utf8")).toBe(broken);
+    // Still on record as on: nothing claims it was turned off.
+    expect((await alwaysOnStatus()).enabled).toBe(true);
+
+    const on = await enableAlwaysOn();
+    expect(on.ok === false && on.reason).toBe("settings_unreadable");
+    expect(await readFile(settingsFile(), "utf8")).toBe(broken);
+
+    // JSON that is not an object is just as foreign.
+    await writeFile(settingsFile(), "[1, 2, 3]", "utf8");
+    expect((await disableAlwaysOn()).ok).toBe(false);
+    expect(await readFile(settingsFile(), "utf8")).toBe("[1, 2, 3]");
+  });
+});
+
+describe("reading the switch back", () => {
+  it("on means the record says on and every written key holds its value", async () => {
+    await writeSettings({ env: { MINE: "x" } });
+    await enableAlwaysOn();
+    expect(await verifyAlwaysOn("on")).toEqual({ ok: true });
+    expect((await verifyAlwaysOn("off")).ok).toBe(false);
+
+    const on = await readSettings();
+    delete on.env!.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+    await writeSettings(on);
+    expect(await verifyAlwaysOn("on")).toEqual({ ok: false, reason: "keys_missing", keys: ["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] });
+  });
+
+  it("off fails while a key only USAGE would have written is still there, and OFF clears it", async () => {
+    await writeSettings({ env: { MINE: "x" } });
+    await enableAlwaysOn();
+    const withKeys = await readSettings();
+    await disableAlwaysOn();
+    // An interrupted earlier switch: the record says off, the file still has ours.
+    await writeSettings(withKeys);
+    const check = await verifyAlwaysOn("off");
+    expect(check.ok === false && check.reason).toBe("keys_remaining");
+    expect(check.ok === false && check.keys).toContain("OTEL_EXPORTER_OTLP_LOGS_HEADERS");
+
+    expect(await disableAlwaysOn()).toMatchObject({ ok: true, changed: true });
+    expect(await readSettings()).toEqual({ env: { MINE: "x" } });
+    expect(await verifyAlwaysOn("off")).toEqual({ ok: true });
+  });
+
+  it("does not count a value the user already had before as USAGE's", async () => {
+    await writeSettings({ env: { CLAUDE_CODE_ENABLE_TELEMETRY: "1" } });
+    await enableAlwaysOn();
+    await disableAlwaysOn();
+    expect((await readSettings()).env).toEqual({ CLAUDE_CODE_ENABLE_TELEMETRY: "1" });
+    expect(await verifyAlwaysOn("off")).toEqual({ ok: true });
   });
 });

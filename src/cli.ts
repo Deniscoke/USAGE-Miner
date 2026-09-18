@@ -40,6 +40,7 @@ import { geminiCliAdapter } from "./tools/gemini-cli.js";
 import { cursorAdapter } from "./tools/cursor.js";
 import type { LocalToolAdapter } from "./tools/adapter.js";
 import { VERSION } from "./version.js";
+import { diagnosticsLine } from "./diagnostics.js";
 import { isMapped, setMapped } from "./mappings.js";
 import { loadDeviceKey } from "./device-key.js";
 import { startMeteringSession } from "./telemetry/session.js";
@@ -164,6 +165,9 @@ async function signIn(): Promise<void> {
 // ---------------------------------------------------------------- status
 
 async function status(): Promise<void> {
+  // First, so it is on screen even when the rest fails: which build this is.
+  out("");
+  out(`  ${diagnosticsLine()}`);
   const credential = await requireCredential();
   // Cleanup runs where a user will see the result, not silently at startup.
   const migration = await migrateInsecureConfig();
@@ -403,10 +407,28 @@ async function disable(toolId: string): Promise<void> {
   // Code session exporting to a loopback port nothing of ours listens on --
   // one any other program could then bind.
   if (adapter.id === "claude-code") {
-    const always = await disableAlwaysOn().catch(() => null);
+    const always = await disableAlwaysOnLogged("cli_disable");
     if (always && (always.ok ? always.changed : true)) out(always.message);
   }
   if (!result.ok) process.exit(1);
+}
+
+/** Turn "measure everywhere" off, logging the outcome either way. */
+async function disableAlwaysOnLogged(via: string): Promise<Awaited<ReturnType<typeof disableAlwaysOn>> | null> {
+  try {
+    const result = await disableAlwaysOn();
+    await logEvent({
+      event: "always_on_disable",
+      tool: "claude-code",
+      outcome: result.ok ? "ok" : "error",
+      detail: result.ok ? `${via}:${result.changed ? "changed" : "unchanged"}` : `${via}:${result.reason}${result.detail ? `:${result.detail}` : ""}`,
+    });
+    return result;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    await logEvent({ event: "always_on_disable", tool: "claude-code", outcome: "error", detail: `${via}:${typeof code === "string" ? code : "exception"}` });
+    return null;
+  }
 }
 
 // ------------------------------------------------------------------- run
@@ -612,6 +634,9 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
 
   child.on("exit", async (code) => {
     presence.stop();
+    // A heartbeat still in flight is let finish rather than cut off by
+    // process.exit below.
+    await presence.idle().catch(() => undefined);
     if (session) {
       const summary = await session.end();
       out("");
@@ -685,12 +710,14 @@ export async function runCli(argv: string[]): Promise<void> {
         break;
       case "sign-out":
         // Leaving the account also takes USAGE's settings out of Claude Code.
-        await disableAlwaysOn().catch(() => null);
+        await disableAlwaysOnLogged("cli_sign_out");
         await clearCredential();
         out("This device is no longer connected. Revoke it at /miners to be certain.");
         break;
       case "version":
-        out(VERSION);
+      case "--version":
+        // From this build only; never the server's idea of it.
+        out(`USAGE ${diagnosticsLine()}`);
         break;
       default:
         help();

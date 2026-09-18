@@ -1,4 +1,4 @@
-import { VERSION } from "./version.js";
+import { PROTOCOL_VERSION, VERSION } from "./version.js";
 
 /**
  * Talking to USAGE.
@@ -279,7 +279,7 @@ export function sendHeartbeat(
     method: "POST",
     token,
     body: JSON.stringify({
-      protocolVersion: "miner-protocol-v2",
+      protocolVersion: PROTOCOL_VERSION,
       minerVersion,
       os,
       tools,

@@ -136,10 +136,28 @@ export function renderApp(nonce: string): string {
       signal: controller ? controller.signal : undefined
     }).then(function (r) {
       return r.text().then(function (text) {
-        try { return JSON.parse(text); } catch (e) { throw new Error("bad_json"); }
+        var body;
+        try { body = JSON.parse(text); } catch (e) { throw new Error("bad_json"); }
+        // A refusal is an answer, never a success: an error status always
+        // carries an error code, whatever the body said.
+        if (!r.ok && body && typeof body === "object" && !body.error) body.error = "http_" + r.status;
+        if (body && typeof body === "object") body.httpStatus = r.status;
+        return body;
       });
     }).finally(function () { if (timer) clearTimeout(timer); });
   }
+
+  // The page re-renders every few seconds. A render between a button's
+  // mousedown and mouseup replaces the button, and the click never fires --
+  // so no render while a pointer is down.
+  var pointerDown = false;
+  document.addEventListener("pointerdown", function () { pointerDown = true; }, true);
+  document.addEventListener("pointerup", function () { setTimeout(function () { pointerDown = false; }, 0); }, true);
+  document.addEventListener("pointercancel", function () { pointerDown = false; }, true);
+
+  // What the last "Measure everywhere" click did, kept across re-renders until
+  // the next click: { kind: "ok" | "err", title, text, warning }.
+  var aoNotice = null;
 
   // What the user sees instead of "Loading…" when startup fails. The
   // category is a word, never a message that could carry a path, a token or
@@ -179,10 +197,15 @@ export function renderApp(nonce: string): string {
     return node;
   }
 
+  // A request that never got an answer is said out loud, not swallowed: the
+  // user must be able to tell "it failed" from "it worked".
   function act(fn) {
-    if (busy) return;
+    if (busy) return false;
     busy = true;
-    fn().catch(function () {}).then(function () { busy = false; refresh(); });
+    fn().catch(function (error) {
+      window.alert("USAGE Miner did not answer (" + categorize(error) + "). Nothing may have changed. If this keeps happening, close this tab and open USAGE Miner again.");
+    }).then(function () { busy = false; refresh(); });
+    return true;
   }
 
   function setupCard(state) {
@@ -265,6 +288,10 @@ export function renderApp(nonce: string): string {
       signIn.appendChild(b);
       if (state.error) signIn.appendChild(el("div", "err", state.error));
       app.appendChild(signIn);
+      // Signed out with it still on: the switch must stay reachable, because
+      // turning it off needs no account.
+      var outCard = everywhereCard(state);
+      if (outCard) app.appendChild(outCard);
       appendFooter(state);
       return;
     }
@@ -540,49 +567,8 @@ export function renderApp(nonce: string): string {
     app.appendChild(tools);
 
     // ------------------------------------------------------------ CLAUDE CODE EVERYWHERE
-    // Claude Code started from a terminal or VS Code, not from this window.
-    // Opt-in, because it writes into Claude Code's own settings file.
-    var claudeTool = state.tools.filter(function (t) { return t.id === "claude-code"; })[0];
-    if (state.signedIn && state.alwaysOn && claudeTool && claudeTool.installed) {
-      var ao = state.alwaysOn;
-      var everywhere = el("div", "card");
-      var aoHead = el("div", "row");
-      aoHead.appendChild(el("h2", null, "Measure Claude Code everywhere"));
-      var aoTag = !ao.enabled ? ["off", "OFF"]
-        : ao.listening === "listening" ? ["on", "ON"]
-        : ao.listening === "port_in_use" ? ["warn", "PORT " + 47823 + " BUSY"]
-        : ["warn", "STARTING"];
-      aoHead.appendChild(el("span", "tag " + aoTag[0], aoTag[1]));
-      everywhere.appendChild(aoHead);
-      everywhere.appendChild(el("div", "note",
-        "Counts Claude Code however you start it: a terminal, a shortcut or the VS Code extension, " +
-        "while this window is running. It adds telemetry settings to Claude Code's settings.json: " +
-        "no password, no key, and prompts and replies stay switched off. Turning it off removes exactly those settings."));
-      everywhere.appendChild(el("div", "note",
-        "This measures usage; it does not earn. Earning still needs Start with USAGE, because only a request " +
-        "USAGE routes can be verified."));
-      if (ao.enabled && ao.listening === "port_in_use") {
-        everywhere.appendChild(el("div", "err",
-          "Another program is using port 47823, so nothing is being received. Close it, or turn this off."));
-      }
-      if (ao.enabled && ao.eventsSinceStart > 0) {
-        everywhere.appendChild(el("div", "meta",
-          ao.eventsSinceStart + " Claude Code request" + (ao.eventsSinceStart === 1 ? "" : "s") + " measured since the miner started" +
-          (ao.lastEventAt ? " · last " + fmtTime(ao.lastEventAt) : "")));
-      }
-      var aoButton = el("button", ao.enabled ? "" : "primary", ao.enabled ? "Turn off" : "Turn on");
-      aoButton.style.marginTop = "10px";
-      aoButton.onclick = function () {
-        act(function () {
-          return api("/always-on", { enabled: !ao.enabled }).then(function (r) {
-            if (r && r.error) window.alert(r.message || "Could not change it.");
-            else if (r && r.warning) window.alert(r.warning);
-          });
-        });
-      };
-      everywhere.appendChild(aoButton);
-      app.appendChild(everywhere);
-    }
+    var everywhere = everywhereCard(state);
+    if (everywhere) app.appendChild(everywhere);
 
     // ------------------------------------------------------------ PRIVACY
     var privacy = el("div", "card");
@@ -599,6 +585,94 @@ export function renderApp(nonce: string): string {
     app.appendChild(privacy);
 
     appendFooter(state);
+  }
+
+  // Claude Code started from a terminal or VS Code, not from this window.
+  // Opt-in, because it writes into Claude Code's own settings file.
+  //
+  // Shown whenever it is ON, whatever else is true -- signed out, revoked,
+  // Claude Code detection timed out on this poll: a switch that is on must
+  // never vanish from under the person trying to turn it off.
+  function everywhereCard(state) {
+    var ao = state.alwaysOn;
+    if (!ao) return null;
+    var claudeTool = state.tools.filter(function (t) { return t.id === "claude-code"; })[0];
+    var offerable = state.signedIn && claudeTool && claudeTool.installed;
+    if (!ao.enabled && !offerable && !aoNotice) return null;
+
+    var card = el("div", "card");
+    var head = el("div", "row");
+    head.appendChild(el("h2", null, "Measure Claude Code everywhere"));
+    var tag = !ao.enabled ? ["off", "OFF"]
+      : ao.listening === "listening" ? ["on", "ON"]
+      : ao.listening === "port_in_use" ? ["warn", "ON · RECEIVED BY ANOTHER WINDOW OR PROGRAM"]
+      : ["warn", "ON · STARTING"];
+    head.appendChild(el("span", "tag " + tag[0], tag[1]));
+    card.appendChild(head);
+
+    if (aoNotice) {
+      var box = el("div", aoNotice.kind === "err" ? "err" : "note");
+      box.appendChild(el("strong", null, aoNotice.title));
+      box.appendChild(el("div", null, aoNotice.text));
+      if (aoNotice.warning) box.appendChild(el("div", "err", aoNotice.warning));
+      card.appendChild(box);
+    }
+
+    card.appendChild(el("div", "note",
+      "Counts Claude Code however you start it: a terminal, a shortcut or the VS Code extension, " +
+      "while USAGE Miner is running. It adds telemetry settings to Claude Code's settings.json: " +
+      "no password, no key, and prompts and replies stay switched off. Turning it off removes exactly those settings."));
+    card.appendChild(el("div", "note",
+      "This measures usage; it does not earn. Earning still needs Start with USAGE, because only a request " +
+      "USAGE routes can be verified."));
+    if (ao.enabled && ao.listening === "port_in_use") {
+      card.appendChild(el("div", "meta",
+        "Port 47823 is held by another USAGE Miner window or another program. If it is another USAGE Miner window, that window receives instead; if not, nothing is received. Turning this off stops it in every USAGE Miner window."));
+    }
+    if (ao.enabled && ao.eventsSinceStart > 0) {
+      card.appendChild(el("div", "meta",
+        ao.eventsSinceStart + " Claude Code request" + (ao.eventsSinceStart === 1 ? "" : "s") + " measured since the miner started" +
+        (ao.lastEventAt ? " · last " + fmtTime(ao.lastEventAt) : "")));
+    }
+
+    var want = !ao.enabled;
+    if (!want || offerable) {
+      var button = el("button", want ? "primary" : "", want ? "Turn on" : "Turn off");
+      button.style.marginTop = "10px";
+      button.disabled = busy;
+      button.onclick = function () {
+        var started = act(function () {
+          aoNotice = null;
+          return api("/always-on", { enabled: want }).then(function (r) {
+            if (!r || r.error || r.ok !== true) {
+              aoNotice = { kind: "err", title: want ? "COULD NOT TURN MEASURE EVERYWHERE ON" : "COULD NOT TURN MEASURE EVERYWHERE OFF", text: describeFailure(r) };
+              return;
+            }
+            aoNotice = { kind: "ok", title: r.title, text: r.message, warning: r.warning || null };
+          }, function (error) {
+            aoNotice = {
+              kind: "err",
+              title: want ? "COULD NOT TURN MEASURE EVERYWHERE ON" : "COULD NOT TURN MEASURE EVERYWHERE OFF",
+              text: "USAGE Miner did not answer (" + categorize(error) + "). Nothing may have changed. If this keeps happening, close this tab and open USAGE Miner again."
+            };
+          });
+        });
+        if (started) {
+          button.disabled = true;
+          button.textContent = want ? "Turning on…" : "Turning off…";
+        }
+      };
+      card.appendChild(button);
+    }
+    return card;
+  }
+
+  function describeFailure(r) {
+    if (!r) return "USAGE Miner gave no answer. Nothing may have changed.";
+    var status = r.httpStatus;
+    if (status === 403) return r.message || "This window is no longer connected to the USAGE Miner that opened it. Close this tab and open USAGE Miner again.";
+    var text = r.message || ("USAGE Miner refused the request (" + (r.error || "error") + ").");
+    return status ? text + " [" + status + "]" : text;
   }
 
   function fmtTokens(n) {
@@ -652,9 +726,14 @@ export function renderApp(nonce: string): string {
       };
       links.appendChild(so);
     }
-    if (state.signedIn) {
-      app.appendChild(el("div", "meta", "Diagnostics: device " + (state.deviceId || "—") + " · network " + (state.network || "—") + " · protocol " + state.version));
-    }
+    // From this process only: the build that is running, the protocol it
+    // speaks, and how it was started. Never the server's idea of either.
+    var dg = state.diagnostics;
+    var dgText = dg
+      ? "Miner " + dg.version + " · protocol " + dg.protocol + " · launch: " + dg.launch
+      : "Miner " + state.version;
+    app.appendChild(el("div", "meta", "Diagnostics: " + dgText +
+      (state.signedIn ? " · device " + (state.deviceId || "—") + " · network " + (state.network || "—") : "")));
     var quit = el("button", null, "Quit");
     quit.onclick = function () {
       api("/quit", {});
@@ -687,7 +766,7 @@ export function renderApp(nonce: string): string {
   try { refresh(); } catch (error) { renderFailure("render"); }
   // Slow enough to be invisible, fast enough that an approval in the browser
   // lands in this window without the user doing anything.
-  setInterval(function () { if (!busy) refresh(); }, 3000);
+  setInterval(function () { if (!busy && !pointerDown) refresh(); }, 3000);
 })();
 </script>
 </body>
