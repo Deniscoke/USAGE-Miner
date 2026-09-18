@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { spawnTool } from "./spawn-tool.js";
 import { hostname, platform, release } from "node:os";
 import {
   DEFAULT_SERVER_URL,
@@ -573,7 +574,20 @@ async function runTool(toolId: string, rawArgs: string[]): Promise<void> {
   out("  Session only — no credential is written to disk.");
   out("");
 
-  const child = spawn(plan.command, [...(plan.args ?? []), ...extraArgs, ...args], { stdio: "inherit", env, shell: true });
+  // No shell: the argv reaches the tool element for element (spawn-tool.ts).
+  let child: ChildProcess;
+  try {
+    child = spawnTool(plan.command, [...(plan.args ?? []), ...extraArgs, ...args], { env, stdio: "inherit" });
+  } catch (error) {
+    out(`  Could not start ${adapter.displayName}: ${(error as Error).message}`);
+    if (session) await session.end().catch(() => undefined);
+    process.exit(1);
+  }
+  child.on("error", async (error) => {
+    out(`  Could not start ${adapter.displayName}: ${error.message}`);
+    if (session) await session.end().catch(() => undefined);
+    process.exit(1);
+  });
 
   // A launched session keeps the device visibly online for as long as the tool
   // runs. It used to send no heartbeat at all, so a PC mining for hours from a
